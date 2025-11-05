@@ -54,7 +54,8 @@ Count=1
 0=mikroE Libraries
 1=System Libraries
 7=Button
-Count=3
+282=Lcd
+Count=4
 [PROGRAMMER_TYPE]
 Value=mikroE mikroProg
 [CODEGRIP_OPTIONS]

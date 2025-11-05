@@ -1,4 +1,4 @@
-/* *********************************************************
+        /* *********************************************************
 Cristal 20 MHz (5 MHz)
 Ciclo de máquina 200nS
 Base de tempo de 1 ms -> Contador do timer0 (16 bits -  0 a 65536) inicia em    60536
@@ -28,65 +28,168 @@ sbit LCD_D4_Direction at TRISD0_bit;
 sbit LCD_D5_Direction at TRISD1_bit;
 sbit LCD_D6_Direction at TRISD2_bit;
 sbit LCD_D7_Direction at TRISD3_bit;
-   
-char txt1[] = "mikroElektronika";
-char txt2[] = "EasyPIC6";
-char txt3[] = "Lcd4bit";
-char txt4[] = "example";
 
-char i;
+//*********************** VARIAVEIS DE USO GLOBAL ***************************
 
-char test_flag = 0;
+// Possive�s entradas do encoder
+typedef enum {
+    ENCODER_NONE,
+    ENCODER_UP,
+    ENCODER_DOWN
+} EncoderInput;
+// Flag do input do encoder
+volatile EncoderInput currentInput = ENCODER_NONE;
 
-void debug()
+// Possive�s estados do programa
+typedef enum {
+    STATE_IDLE,                        // Dispositivo iniciado mas sem nada a fazer
+    STATE_STARTING_TEST,               // Teste de reação iniciado
+    STATE_RUNNING_TEST,                // Teste de reação sendo utilizado         
+    STATE_RENDERING_MENU,              // O menu de configuração está rodando
+    STATE_SELECTING_MENU,
+    STATE_ERROR
+} ProgramState;
+// Flag de estado do programa
+volatile ProgramState currentState = STATE_IDLE;
+
+int flag_blink = 0;
+// Função apenas para teste
+void blink()
 {
-        if(test_flag == 0){
-                test_flag = 1;
-        }else{
-                test_flag = 0;
-        }
-        txt1[2] = 'x';
-        txt2[2] = 'x';
-
+    if(flag_blink){
+        flag_blink = 0;
+    }
+    else
+    {
+        flag_blink = 1;
+    }
 }
-
 
 //*********************** INTERRUPCAO   ***************************
  void interrupt()
 {
     // -- Trata Interrupção timer0 --
-    if(TMR0IF_bit) // Houve interrupção no
-    {                        
+    if(TMR0IF_bit)
+    {
         TMR0IF_bit=0x00;
+        // Recarrega o timer - TODO:conferir se realmente se faz necessário
+        TMR0H = 0xEC;
+        TMR0L = 0x89;
     }
 
-    // -- Trata Interrupção Externa 0 --
-    if(INT0IF_bit)                              //Houve interrupção externa 0?  => TESTE ENCERRADO - > BOTÃO TESTE PRESSIONADO
-    {                                           //Sim...
-        INT0IF_bit = 0x00;                      //limpa flag INT0IF
-        debug();
-
+    // -- Trata Interrupção Externa 0 -- Botão do teste
+    if(INT0IF_bit)
+    {
+        INT0IF_bit = 0x00;
+        blink();
     }
 
-    // -- Trata Interrupção Externa 1 --
-    if(INT1IF_bit)                              //Houve interrupção externa 1?  =>encoder rotativo
-    {                                           //Sim...
-        debug();
-        INT1IF_bit = 0x00;                      //limpa flag INT1IF
-
+    // -- Trata Interrupção Externa 1 -- Clock do encoder
+    if(INT1IF_bit)
+    {
+        INT1IF_bit = 0x00;
+        blink();
+        if(PORTB.B3 == 1) {
+            currentInput = ENCODER_UP;
+        } else {
+            currentInput = ENCODER_DOWN;
+        }
     }
 
-     // -- Trata Interrupção Externa 2 --
-    if(INT2IF_bit)                              //Houve interrupção externa 2?  => SW do encoder
-    {                                           //Sim...
-       INT2IF_bit = 0x00;                       //limpa flag INT2IF
-       debug();
+     // -- Trata Interrupção Externa 2 -- Click do encoder
+    if(INT2IF_bit)
+    {
+        INT2IF_bit = 0x00;
+        blink();
+        if(currentState == STATE_IDLE) {
+            currentState = STATE_RENDERING_MENU;
+        }
+        else if (currentState == STATE_SELECTING_MENU) {
+            blink();
+            // Lógica para "selecionar" o item
+            // ex: if (selected == 2) currentState = STATE_STARTING_TEST;
+        }
     }
 }
 
+//*********************** OUTRAS FUNÇÕES ***************************
+void initLcd()
+{
+    Lcd_Init();
+    Lcd_Cmd(_LCD_CLEAR);               // Limpa o display
+    Lcd_Cmd(_LCD_CURSOR_OFF);          // Desliga o cursor
+}
+
+void initRenderMenu()
+{
+    Lcd_Cmd(_LCD_CLEAR);
+    // Lcd_Cmd(_LCD_BLINK_CURSOR_ON);      // Desliga o cursor
+}
+
+int selected = 0;
+int op1 = 0;
+int op2 = 1;
+const int numMenuOptions = 3;
+// Deveria ser uma constante mas causa erros
+// Os espa�os s�o pra sobrescrever o buffer, e n�o deixar a �ltima letra da maior palavra ocupando espa�o. TODO: produzir uma solu��o mais sofisticada
+char* menuItems[] = {
+    "Período      ",
+    "Display      ",
+    "Iniciar      "
+};
+
+
+void renderMenu()
+{
+    switch (currentInput) {
+        case ENCODER_UP:
+        selected--;
+        break;
+        case ENCODER_DOWN:
+        selected++;
+        break;
+        case ENCODER_NONE: // Não faz nada se não ouvir input no clock do encoder
+        default:
+            // Opção inexistente
+        break;
+    }
+    currentInput = ENCODER_NONE; // Limpa a flag do input depois de usar
+    
+    // Creio que dê pra melhorar essa parte, diminuindo uma variávelou reoorganizando as condições
+    op1 = selected;
+    op2 = selected + 1;
+
+    if(selected < 0)
+    {
+        selected = numMenuOptions - 1;
+        op1 = selected;
+        op2 = 0;
+    }
+    else if(selected >= numMenuOptions)
+    {
+        selected = 0;
+        op1 = 0;
+        op2 = 1;
+    }
+    else if(selected == numMenuOptions - 1)
+    {
+        selected = 2;
+        op1 = 2;
+        op2 = 0;
+    }
+
+    // Lcd_Cmd(_LCD_CLEAR); // Teoricamente não deveria limpar toda hora, mas é necessário reescrever o buffer nas posições que não contém um espaço vazio
+    Lcd_Out(1, 1,  ">");
+    Lcd_Out(1, 2, menuItems[op1]);
+
+    Lcd_Out(2, 1, " ");
+    Lcd_Out(2, 2, menuItems[op2]);
+}
+
 void main() {
-        RCON.IPEN = 0;
         
+    RCON.IPEN = 0;                              // Desabilita a prioridade de input, assim todas interrup��es rodam no interrupt() ignorando o interrupt_low() -- Conversar com professor --
+    
     // *************************** REGISTRADORESA ***************************
     CMCON = 0x07;                               // Desabilita os comparadores
     T0CON = 0x88;                               //configura timer0  16 bits
@@ -113,44 +216,38 @@ void main() {
     TRISE.B2= 0x00;                             //configura E2 como saída (pino 10 para teste)
     PORTC   = 0x00;                             // inicia porta C em low
 
-//    while(1)
-//    {
-//        LATE.B2=0X01;
-//        delay_ms(200);
-//        LATE.B2=0X00;
-//        delay_ms(200);
-//    }
-  
-      Lcd_Init();
-      
-      Lcd_Cmd(_LCD_CLEAR);               // Clear display
-      Lcd_Cmd(_LCD_CURSOR_OFF);          // Cursor off
-      Lcd_Out(1,6,txt3);                 // Write text in first row
+    // *************************** CORPO DO PROGRAMA ***************************
+    LATE.B2 = 0; // Desliga o led de test
 
-      Lcd_Out(2,6,txt4);                 // Write text in second row
-      Delay_ms(2000);
-      Lcd_Cmd(_LCD_CLEAR);               // Clear display
+    initLcd();
 
-      Lcd_Out(1,1,txt1);                 // Write text in first row
-      Lcd_Out(2,5,txt2);                 // Write text in second row
+    while(1) {
+        // This is the core of the Finite State Machine
+        switch(currentState) {
 
-      Delay_ms(2000);
-    
-    
-    // Moving text
-    for(i=0; i<4; i++) {               // Move text to the right 4 times
-      Lcd_Cmd(_LCD_SHIFT_RIGHT);
-      delay_ms(2000);
+            case STATE_IDLE:
+                Lcd_Out(1, 1, "Dispositivo");
+                Lcd_Out(2, 1, "iniciado.");
+                break;
+            case STATE_RENDERING_MENU:
+                initRenderMenu();
+                currentState = STATE_SELECTING_MENU;
+                break;
+            case STATE_SELECTING_MENU:
+                renderMenu();
+                break;
+            default:
+                // Estado inexistente, programa deve ser encerrado.
+                break;
+        }
+
+        // Roda o blink apenas para teste
+        if(flag_blink){
+            LATE.B2=0X01;
+            // delay_ms(200);
+            LATE.B2=0X00;
+            
+            flag_blink = 0;
+        }
     }
-
-    while(1) {                         // Endless loop
-      if(test_flag == 1){
-          LATE.B2=0X01;
-          delay_ms(20);
-          LATE.B2=0X00;
-          delay_ms(20);
-      }
-    }
-
-
 }
