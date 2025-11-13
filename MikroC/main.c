@@ -29,30 +29,8 @@ sbit LCD_D5_Direction at TRISD1_bit;
 sbit LCD_D6_Direction at TRISD2_bit;
 sbit LCD_D7_Direction at TRISD3_bit;
 
-//*********************** VARIAVEIS DE USO GLOBAL ***************************
-
-// Possive�s entradas do encoder
-typedef enum {
-    ENCODER_NONE,
-    ENCODER_UP,
-    ENCODER_DOWN
-} EncoderInput;
-// Flag do input do encoder
-volatile EncoderInput currentInput = ENCODER_NONE;
-
-// Possive�s estados do programa
-typedef enum {
-    STATE_IDLE,                        // Dispositivo iniciado mas sem nada a fazer
-    STATE_STARTING_TEST,               // Teste de reação iniciado
-    STATE_RUNNING_TEST,                // Teste de reação sendo utilizado         
-    STATE_RENDERING_MENU,              // O menu de configuração está rodando
-    STATE_SELECTING_MENU,
-    STATE_ERROR
-} ProgramState;
-// Flag de estado do programa
-volatile ProgramState currentState = STATE_IDLE;
-
-int flag_blink = 0;
+//*********************** FUNÇÃO DE TESTE ***************************
+volatile int flag_blink = 0;
 // Função apenas para teste
 void blink()
 {
@@ -65,8 +43,111 @@ void blink()
     }
 }
 
+//*********************** VARIAVEIS DE USO GLOBAL ***************************
+
+// Possive�s estados do programa
+typedef enum {
+    STATE_IDLE,                         // Dispositivo iniciado mas sem nada a fazer
+    STATE_RUNNING_TEST,                 // Teste de reação sendo utilizado         
+    STATE_INIT_RENDER_MENU,             // Inicia o menu
+    STATE_SELECTING_MENU,               // Selecionando alguma opção no menu
+    STATE_INIT_CONFIG_PERIODO,          // Inicia o menu de configuracao do periodo
+    STATE_CONFIG_PERIODO,               // Configurando o período (tempo entre um led e outro piscar)
+    STATE_INIT_CONFIG_DISPLAY,          // Inicia o menu de configuracao do display
+    STATE_CONFIG_DISPLAY,               // Configurando o display (qual dos N leds vai piscar)
+    STATE_STARTING_TEST,                // Teste de reação iniciado
+    STATE_ERROR
+} ProgramState;
+
+// Flag de estado do programa
+volatile ProgramState currentState = STATE_IDLE;
+
+// Possive�s entradas do encoder
+typedef enum {
+    ENCODER_NONE,
+    ENCODER_UP,
+    ENCODER_DOWN
+} EncoderInput;
+
+// Flag do input do encoder - Nunca acesse essa variável, sempre use a funcao getEncoderInput()
+volatile EncoderInput _currentInput = ENCODER_NONE;
+
+//*********************** VARIÁVEIS DE CONFUGURAÇÃO DO TESTE ***************************
+int _testPeriodo = 50;
+int _testDisplay = 1;
+
+//*********************** FUNÇÕES PARA RECEBER O INPUT DO MENU ***************************
+// TODO: Considerar levar essa função para outro arquivo, por organização
+// Tem de ser declaradas antes de serem utilizadas pelo menuItems
+
+// --- Item Período ---
+void periodo_onClick() {
+    switch (currentState) {
+        // Indica que o usuário estava no menu de seleção
+        case STATE_SELECTING_MENU:
+            // Marca o estado como configurando o período
+            currentState = STATE_INIT_CONFIG_PERIODO;
+        break;
+        // Indica que a configuração foi confirmada
+        case STATE_CONFIG_PERIODO:
+            // Volta a renderizar o menu
+            currentState = STATE_INIT_RENDER_MENU;
+        break;
+        default:
+        break;
+    }
+}
+
+
+
+// --- Item Display ---
+void display_onClick() {
+    switch (currentState) {
+        // Indica que o usuário estava no menu de seleção
+        case STATE_SELECTING_MENU:
+            // Marca o estado como configurando o período
+            currentState = STATE_INIT_CONFIG_DISPLAY;
+        break;
+        // Indica que a configuração foi confirmada
+        case STATE_CONFIG_DISPLAY:
+            // Volta a renderizar o menu
+            currentState = STATE_INIT_RENDER_MENU;
+        break;
+        default:
+        break;
+    }
+}
+
+// --- Item Iniciar ---
+void iniciar_onClick() {
+    blink();
+}
+
+//*********************** OUTRAS VARIÁVEIS LIGADAS AO MENU ***************************
+// Ponteiros para funções de cada estado do menu
+// 'onClickFunc' é um ponteiro para uma função sem parâmetros que retorna void.
+typedef void (*onClickFunc)(void);
+
+// Struct para definir das possiveís opções do menu
+typedef struct {
+    char name[17];
+    onClickFunc onClick;
+} MenuOption;
+
+// Variável que indica qual opção do menu está selecionada
+int selected = 0;
+// Número de opções do menu
+const int numMenuItems = 3;
+// Array com as opções do menu
+const MenuOption menuItems[3] = {
+    // Os espa�os no nome s�o pra sobrescrever o buffer, e n�o deixar a �ltima letra da maior palavra ocupando espa�o. TODO: produzir uma solu��o mais sofisticada
+    { "Período     ", periodo_onClick },
+    { "Display     ", display_onClick },
+    { "Iniciar     ", iniciar_onClick }
+};
+
 //*********************** INTERRUPCAO   ***************************
- void interrupt()
+void interrupt()
 {
     // -- Trata Interrupção timer0 --
     if(TMR0IF_bit)
@@ -81,18 +162,16 @@ void blink()
     if(INT0IF_bit)
     {
         INT0IF_bit = 0x00;
-        blink();
     }
 
     // -- Trata Interrupção Externa 1 -- Clock do encoder
     if(INT1IF_bit)
     {
         INT1IF_bit = 0x00;
-        blink();
         if(PORTB.B3 == 1) {
-            currentInput = ENCODER_UP;
+            _currentInput = ENCODER_UP;
         } else {
-            currentInput = ENCODER_DOWN;
+            _currentInput = ENCODER_DOWN;
         }
     }
 
@@ -100,19 +179,48 @@ void blink()
     if(INT2IF_bit)
     {
         INT2IF_bit = 0x00;
-        blink();
-        if(currentState == STATE_IDLE) {
-            currentState = STATE_RENDERING_MENU;
-        }
-        else if (currentState == STATE_SELECTING_MENU) {
-            blink();
-            // Lógica para "selecionar" o item
-            // ex: if (selected == 2) currentState = STATE_STARTING_TEST;
+        
+        switch(currentState){
+            case STATE_IDLE:
+                currentState = STATE_INIT_RENDER_MENU;
+            break;
+            // A partir deste ponto um if pode ser considerado mais limpo
+            case STATE_SELECTING_MENU:
+                // Lógica de selecionar a opcao do menu
+                menuItems[selected].onClick();
+            break;
+            case STATE_CONFIG_PERIODO:
+                menuItems[selected].onClick();
+            break;
+            case STATE_CONFIG_DISPLAY:
+                menuItems[selected].onClick();
+            break;
         }
     }
 }
 
 //*********************** OUTRAS FUNÇÕES ***************************
+
+// Função para garantir que sempre que a entrada do encoder for lida ela seja resetada
+EncoderInput getEncoderInput()
+{
+    EncoderInput oldInput = _currentInput;
+    _currentInput = ENCODER_NONE; // Reseta a entrada do encoder
+    return  oldInput;
+}
+
+// TODO: Considerar uma solução mais robusta e limpa ao invés dessa função para acessar a ROM
+void strcpy_ROM_to_RAM(char* ram_dest, const char* rom_src)
+{
+    char c;
+    // Loop até encontrar o caractere nulo '\0'
+    while (c = *rom_src++) {
+        *ram_dest++ = c;
+    }
+    // Adiciona o caractere nulo no final do buffer da RAM
+    *ram_dest = '\0'; 
+}
+
 void initLcd()
 {
     Lcd_Init();
@@ -120,70 +228,137 @@ void initLcd()
     Lcd_Cmd(_LCD_CURSOR_OFF);          // Desliga o cursor
 }
 
-void initRenderMenu()
+void clearLcd()
 {
     Lcd_Cmd(_LCD_CLEAR);
-    // Lcd_Cmd(_LCD_BLINK_CURSOR_ON);      // Desliga o cursor
 }
-
-int selected = 0;
-int op1 = 0;
-int op2 = 1;
-const int numMenuOptions = 3;
-// Deveria ser uma constante mas causa erros
-// Os espa�os s�o pra sobrescrever o buffer, e n�o deixar a �ltima letra da maior palavra ocupando espa�o. TODO: produzir uma solu��o mais sofisticada
-char* menuItems[] = {
-    "Período      ",
-    "Display      ",
-    "Iniciar      "
-};
-
 
 void renderMenu()
 {
-    switch (currentInput) {
+    int op1;
+    int op2;
+    // Buffers na RAM
+    char linha1_buffer[17]; 
+    char linha2_buffer[17];
+
+    switch (getEncoderInput()) {
         case ENCODER_UP:
-        selected--;
-        break;
+            selected--;
+            break;
         case ENCODER_DOWN:
-        selected++;
-        break;
-        case ENCODER_NONE: // Não faz nada se não ouvir input no clock do encoder
+            selected++;
+            break;
         default:
-            // Opção inexistente
-        break;
+            break; 
     }
-    currentInput = ENCODER_NONE; // Limpa a flag do input depois de usar
-    
-    // Creio que dê pra melhorar essa parte, diminuindo uma variávelou reoorganizando as condições
+
+    // Para que as opções sejam válidas
     op1 = selected;
     op2 = selected + 1;
 
     if(selected < 0)
     {
-        selected = numMenuOptions - 1;
+        selected = numMenuItems - 1;
         op1 = selected;
         op2 = 0;
     }
-    else if(selected >= numMenuOptions)
+    else if(selected >= numMenuItems)
     {
         selected = 0;
         op1 = 0;
         op2 = 1;
     }
-    else if(selected == numMenuOptions - 1)
+    else if(selected == numMenuItems - 1)
     {
-        selected = 2;
-        op1 = 2;
+        selected = numMenuItems - 1;
+        op1 = numMenuItems - 1;
         op2 = 0;
     }
 
-    // Lcd_Cmd(_LCD_CLEAR); // Teoricamente não deveria limpar toda hora, mas é necessário reescrever o buffer nas posições que não contém um espaço vazio
-    Lcd_Out(1, 1,  ">");
-    Lcd_Out(1, 2, menuItems[op1]);
+    // Copia da ROM para a RAM usando NOSSA função
+    strcpy_ROM_to_RAM(linha1_buffer, menuItems[op1].name);
+    strcpy_ROM_to_RAM(linha2_buffer, menuItems[op2].name);
+
+    Lcd_Out(1, 1, ">"); 
+    Lcd_Out(1, 2, linha1_buffer); // Passa o buffer da RAM
 
     Lcd_Out(2, 1, " ");
-    Lcd_Out(2, 2, menuItems[op2]);
+    Lcd_Out(2, 2, linha2_buffer); // Passa o buffer da RAM
+}
+
+void renderPeriodoMenu()
+{
+    const int periodoStep = 50;
+    const int periodoMin = 50;
+    const int periodoMax = 1000;
+    // O valor que há de ser registrado está na variável global _testPeriodo
+
+    // Buffer de RAM para converter o número
+    char periodoBuffer[7]; // Suficiente para "1000" e o nulo
+    
+    
+    switch (getEncoderInput()) {
+        case ENCODER_UP:
+            _testPeriodo += periodoStep;
+        break;
+        case ENCODER_DOWN:
+            _testPeriodo -= periodoStep;
+            break;
+        default:
+            break;
+    }
+
+    if(_testPeriodo > periodoMax)
+    {
+        _testPeriodo = periodoMin;
+    }
+    else if (_testPeriodo < periodoMin)
+    {
+        _testPeriodo = periodoMax;
+    }  
+
+    IntToStr(_testPeriodo, periodoBuffer);
+
+    Lcd_Out(1, 1, "Período: ");
+    Lcd_Out(2, 1, periodoBuffer);
+    Lcd_Out_Cp(" ns");
+}
+
+void renderDisplayMenu()
+{
+    const int displayMin = 1;
+    const int displayMax = 20;
+    // O valor que há de ser registrado está na variável global _testDisplay
+
+    // Buffer de RAM para converter o número
+    char displayBuffer[3]; // Suficiente para 2 digitos e o nulo
+    
+    
+    switch (getEncoderInput()) {
+        case ENCODER_UP:
+            _testDisplay += 1;
+        break;
+        case ENCODER_DOWN:
+            _testDisplay -= 1;
+            break;
+        default:
+            break;
+    }
+
+    if(_testDisplay > displayMax)
+    {
+        _testDisplay = displayMin;
+    }
+    else if (_testDisplay < displayMin)
+    {
+        _testDisplay = displayMax;
+    }  
+
+    IntToStr(_testDisplay, displayBuffer);
+
+    Lcd_Out(1, 1, "Display: ");
+    Lcd_Out(2, 1, displayBuffer);
+    Lcd_Out_Cp("°");
 }
 
 void main() {
@@ -228,14 +403,28 @@ void main() {
             case STATE_IDLE:
                 Lcd_Out(1, 1, "Dispositivo");
                 Lcd_Out(2, 1, "iniciado.");
-                break;
-            case STATE_RENDERING_MENU:
-                initRenderMenu();
+            break;
+            case STATE_INIT_RENDER_MENU:
+                clearLcd();
                 currentState = STATE_SELECTING_MENU;
-                break;
+            break;
             case STATE_SELECTING_MENU:
                 renderMenu();
-                break;
+            break;
+            case STATE_INIT_CONFIG_PERIODO:
+                clearLcd();
+                currentState = STATE_CONFIG_PERIODO;
+            break;
+            case STATE_CONFIG_PERIODO:
+                renderPeriodoMenu();
+            break;
+            case STATE_INIT_CONFIG_DISPLAY:
+                clearLcd();
+                currentState = STATE_CONFIG_DISPLAY;
+            break;
+            case STATE_CONFIG_DISPLAY:
+                renderDisplayMenu();
+            break;
             default:
                 // Estado inexistente, programa deve ser encerrado.
                 break;

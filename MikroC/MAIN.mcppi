@@ -43,7 +43,9 @@ Count=0
 [Useses]
 File0=Lcd
 File1=Lcd_Constants
-Count=2
+File2=Conversions
+File3=C_String
+Count=4
 [INTERRUPT_DEFS]
 VECTOR_MODE=0
 IVT_BASE=00000008
@@ -54,8 +56,7 @@ Count=1
 0=mikroE Libraries
 1=System Libraries
 7=Button
-282=Lcd
-Count=4
+Count=3
 [PROGRAMMER_TYPE]
 Value=mikroE mikroProg
 [CODEGRIP_OPTIONS]
