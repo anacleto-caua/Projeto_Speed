@@ -29,6 +29,12 @@ sbit LCD_D5_Direction at TRISD1_bit;
 sbit LCD_D6_Direction at TRISD2_bit;
 sbit LCD_D7_Direction at TRISD3_bit;
 
+// *************************** Definições do shift register ***************************
+// Mapeamento do shift register: C0=Clock, C1=Data, C2=Latch
+#define CLOCK_PIN  LATC0_bit 
+#define LATCH_PIN  LATC1_bit
+#define DATA_PIN   LATC2_bit 
+
 //*********************** FUNÇÃO DE TESTE ***************************
 volatile int flag_blink = 0;
 // Função apenas para teste
@@ -48,7 +54,6 @@ void blink()
 // Possive�s estados do programa
 typedef enum {
     STATE_IDLE,                         // Dispositivo iniciado mas sem nada a fazer
-    STATE_RUNNING_TEST,                 // Teste de reação sendo utilizado         
     STATE_INIT_RENDER_MENU,             // Inicia o menu
     STATE_SELECTING_MENU,               // Selecionando alguma opção no menu
     STATE_INIT_CONFIG_PERIODO,          // Inicia o menu de configuracao do periodo
@@ -56,6 +61,7 @@ typedef enum {
     STATE_INIT_CONFIG_DISPLAY,          // Inicia o menu de configuracao do display
     STATE_CONFIG_DISPLAY,               // Configurando o display (qual dos N leds vai piscar)
     STATE_STARTING_TEST,                // Teste de reação iniciado
+    STATE_RUNNING_TEST,                // Teste de reação rodando
     STATE_ERROR
 } ProgramState;
 
@@ -73,8 +79,9 @@ typedef enum {
 volatile EncoderInput _currentInput = ENCODER_NONE;
 
 //*********************** VARIÁVEIS DE CONFUGURAÇÃO DO TESTE ***************************
-int _testPeriodo = 50;
-int _testDisplay = 1;
+int _testPeriodo = 50;      // Quanto tempo de luz dar para cada led
+int _testDisplay = 1;       // Qual led vai ser o principal do test
+unsigned long _ledToBlink = 0;        // Qual led vai ser o próximo piscado
 
 //*********************** FUNÇÕES PARA RECEBER O INPUT DO MENU ***************************
 // TODO: Considerar levar essa função para outro arquivo, por organização
@@ -98,8 +105,6 @@ void periodo_onClick() {
     }
 }
 
-
-
 // --- Item Display ---
 void display_onClick() {
     switch (currentState) {
@@ -120,7 +125,7 @@ void display_onClick() {
 
 // --- Item Iniciar ---
 void iniciar_onClick() {
-    blink();
+    currentState = STATE_STARTING_TEST;
 }
 
 //*********************** OUTRAS VARIÁVEIS LIGADAS AO MENU ***************************
@@ -198,6 +203,35 @@ void interrupt()
         }
     }
 }
+
+
+//*********************** FUNÇÕES DO SHIFT REGISTER ***************************
+void clockLeds()
+{
+    CLOCK_PIN = 1;
+    CLOCK_PIN = 0;
+}
+
+void shiftOutByte(unsigned char data_byte) {
+    int i;
+    for(i = 0; i < 8; i++) {
+        if (data_byte & (1 << (7 - i))) {
+            DATA_PIN = 1;
+        } else {
+            DATA_PIN = 0;
+        }    
+        clockLeds();
+    }    
+}    
+
+void write32Bits(unsigned long number) {
+    LATCH_PIN = 0; 
+    shiftOutByte((number >> 24) & 0xFF); // Chip 4
+    shiftOutByte((number >> 16) & 0xFF); // Chip 3
+    shiftOutByte((number >> 8)  & 0xFF); // Chip 2
+    shiftOutByte(number & 0xFF);         // Chip 1
+    LATCH_PIN = 1; 
+}    
 
 //*********************** OUTRAS FUNÇÕES ***************************
 
@@ -327,7 +361,7 @@ void renderPeriodoMenu()
 void renderDisplayMenu()
 {
     const int displayMin = 1;
-    const int displayMax = 20;
+    const int displayMax = 32;
     // O valor que há de ser registrado está na variável global _testDisplay
 
     // Buffer de RAM para converter o número
@@ -359,6 +393,39 @@ void renderDisplayMenu()
     Lcd_Out(1, 1, "Display: ");
     Lcd_Out(2, 1, displayBuffer);
     Lcd_Out_Cp("°");
+}
+
+void startLedTesting()
+{
+    clearLcd();
+    Lcd_Out(1, 1, "Testando...");
+    write32Bits(0x00000000);    // Desliga todos os LEDs
+}
+
+void runningTest()
+{
+    // Variável para guardar o "desenho" dos bits
+    unsigned long pattern;
+    
+    // Calcula qual LED acender baseada no contador _ledToBlink
+    // Ex: Se _ledToBlink for 2, pattern vira 000...0100
+    pattern = (1UL << _ledToBlink); 
+
+    // Envia para os Shift Registers
+    write32Bits(pattern);
+
+    // Espera o tempo configurado
+    // Nota: Vdelay aceita variaveis. Delay_ms precisa de constante.  -- TODO: Conversar com o Professor -- 
+    Vdelay_ms(_testPeriodo);            
+
+    // Prepara o próximo LED
+    _ledToBlink++; 
+
+    // Verifica se chegou no fim (LED 32 não existe, vai de 0 a 31)
+    if (_ledToBlink >= 32) {
+        // Reseta para o começo (loop infinito)
+        _ledToBlink = 0;
+    }
 }
 
 void main() {
@@ -394,6 +461,9 @@ void main() {
     // *************************** CORPO DO PROGRAMA ***************************
     LATE.B2 = 0; // Desliga o led de test
 
+    TRISC = 0x00; // All PORTC as output
+    LATCH_PIN = 1;
+
     initLcd();
 
     while(1) {
@@ -424,6 +494,13 @@ void main() {
             break;
             case STATE_CONFIG_DISPLAY:
                 renderDisplayMenu();
+            break;
+            case STATE_STARTING_TEST:
+                startLedTesting();
+                currentState = STATE_RUNNING_TEST;
+            break;
+            case STATE_RUNNING_TEST:
+                runningTest();
             break;
             default:
                 // Estado inexistente, programa deve ser encerrado.
