@@ -356,7 +356,7 @@ void renderPeriodoMenu()
 
     Lcd_Out(1, 1, "Período: ");
     Lcd_Out(2, 1, periodoBuffer);
-    Lcd_Out_Cp(" ns");
+    Lcd_Out_Cp(" ns ");
 }
 
 void renderDisplayMenu()
@@ -404,8 +404,20 @@ void renderDisplayMenu()
 void startTest()
 {
     clearLcd();
-    Lcd_Out(1, 1, "Testando...");
-    write32Bits(0x00000000);    // Desliga todos os LEDs
+    Lcd_Out(1, 1, "Iniciando...");
+
+    // Acende todos os leds
+    write32Bits(0xFFFFFFFF); 
+    Vdelay_ms(_testPeriodo);   // Wait
+    
+    // Apaga todos os leds
+    write32Bits(0x00000000);   
+    Vdelay_ms(_testPeriodo);
+    
+    // Reseta contador de Leds
+    ledToBlink = 0;
+
+    Lcd_Out(1, 1, "Testando...  ");
 }
 
 void runningTest()
@@ -417,24 +429,28 @@ void runningTest()
     // Ex: Se _ledToBlink for 2, pattern vira 000...0100
     pattern = (1UL << ledToBlink); 
 
-    // Envia para os Shift Registers
+    // Liga um led
     write32Bits(pattern);
 
     // Espera o tempo configurado
     // Nota: Vdelay aceita variaveis. Delay_ms precisa de constante.  -- TODO: Conversar com o Professor -- 
-    Vdelay_ms(_testPeriodo);            
+    Vdelay_ms(_testPeriodo);
+
+    // Apaga o Led
+    write32Bits(0x00000000);
 
     // Prepara o próximo LED
     ledToBlink++; 
 
-    // Verifica se chegou no fim (LED 32 não existe, vai de 0 a 31)
+    // Por enquanto continua em looping, mas deveria falahr o teste
     if (ledToBlink >= 32) {
-        // Reseta para o começo (loop infinito)
         ledToBlink = 0;
+        // currentState = STATE_STARTING_TEST;
     }
 }
 
-void main() {
+void main()
+{
         
     RCON.IPEN = 0;                              // Desabilita a prioridade de input, assim todas interrup��es rodam no interrupt() ignorando o interrupt_low() -- Conversar com professor --
     
