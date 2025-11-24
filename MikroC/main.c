@@ -79,9 +79,17 @@ typedef enum {
 volatile EncoderInput _currentInput = ENCODER_NONE;
 
 //*********************** VARIÁVEIS DE CONFUGURAÇÃO DO TESTE ***************************
-int _testPeriodo = 50;                  // Quanto tempo de luz dar para cada led
-int _testDisplay = 1;                   // Qual led vai ser o principal do test
-unsigned long _ledToBlink = 0;        // Qual led vai ser o próximo piscado
+// Ambos _testPeriodo e _testDisplay não possuem unsigned pois isso quebra a lógica de wrap-arround
+const unsigned int _minPeriodo = 50;
+const unsigned int _maxPeriodo = 300;   
+const unsigned int _periodoStep = 50;   // De quanto em quanto sobe no menu
+int _testPeriodo = 100;                      // Quanto tempo de luz dar para cada led
+
+// 32 LEDS ENUMERADOS DE 0 A 31
+// Para o usuário será enumerado de 1 - 32 por simplicidade
+const unsigned int _numLeds = 32; 
+unsigned long ledToBlink = 0;           // Qual led vai ser o próximo piscado
+int _testDisplay = 0;                       // Qual led vai ser o principal do teste
 
 //*********************** FUNÇÕES PARA RECEBER O INPUT DO MENU ***************************
 // TODO: Considerar levar essa função para outro arquivo, por organização
@@ -167,6 +175,11 @@ void interrupt()
     if(INT0IF_bit)
     {
         INT0IF_bit = 0x00;
+        
+        if(ledToBlink == _testDisplay)
+        {
+            currentState = STATE_IDLE;
+        }
     }
 
     // -- Trata Interrupção Externa 1 -- Clock do encoder
@@ -322,34 +335,22 @@ void renderMenu()
 
 void renderPeriodoMenu()
 {
-    const int periodoStep = 50;
-    const int periodoMin = 50;
-    const int periodoMax = 1000;
     // O valor que há de ser registrado está na variável global _testPeriodo
 
     // Buffer de RAM para converter o número
     char periodoBuffer[7]; // Suficiente para "1000" e o nulo
     
-    
     switch (getEncoderInput()) {
         case ENCODER_UP:
-            _testPeriodo += periodoStep;
+            _testPeriodo += _periodoStep;
         break;
         case ENCODER_DOWN:
-            _testPeriodo -= periodoStep;
-            break;
-        default:
+            _testPeriodo -= _periodoStep;
             break;
     }
 
-    if(_testPeriodo > periodoMax)
-    {
-        _testPeriodo = periodoMin;
-    }
-    else if (_testPeriodo < periodoMin)
-    {
-        _testPeriodo = periodoMax;
-    }  
+    if (_testPeriodo > _maxPeriodo) _testPeriodo = _minPeriodo;
+    if (_testPeriodo < _minPeriodo) _testPeriodo = _maxPeriodo;
 
     IntToStr(_testPeriodo, periodoBuffer);
 
@@ -360,39 +361,44 @@ void renderPeriodoMenu()
 
 void renderDisplayMenu()
 {
-    const int displayMin = 1;
-    const int displayMax = 32;
+    const int displayMin = 0;
+    const int displayMax = _numLeds - 1;
     // O valor que há de ser registrado está na variável global _testDisplay
+    
+    // Buffers para saída de dados
+    char bufferTemp[7];         // Buffer para conversões
+    char bufferDisplayMsg[20];  // Suficiente para toda a extensão do display
 
-    // Buffer de RAM para converter o número
-    char displayBuffer[3]; // Suficiente para 2 digitos e o nulo
-    
-    
     switch (getEncoderInput()) {
         case ENCODER_UP:
-            _testDisplay += 1;
-        break;
+            _testDisplay++;
+            break;
         case ENCODER_DOWN:
-            _testDisplay -= 1;
-            break;
-        default:
+            _testDisplay--;
             break;
     }
-
-    if(_testDisplay > displayMax)
-    {
-        _testDisplay = displayMin;
-    }
-    else if (_testDisplay < displayMin)
-    {
-        _testDisplay = displayMax;
-    }  
-
-    IntToStr(_testDisplay, displayBuffer);
-
-    Lcd_Out(1, 1, "Display: ");
-    Lcd_Out(2, 1, displayBuffer);
-    Lcd_Out_Cp("°");
+    
+    if (_testDisplay > displayMax)  _testDisplay = displayMin;
+    if (_testDisplay < displayMin)  _testDisplay = displayMax;
+    
+    // Formatando o buffer: "Display: 1 - 32"
+    strcpy(bufferDisplayMsg, "Display: ");
+    IntToStr(displayMin + 1, bufferTemp);
+    Ltrim(bufferTemp);
+    strcat(bufferDisplayMsg, bufferTemp);
+    strcat(bufferDisplayMsg, " - ");
+    IntToStr(displayMax + 1, bufferTemp);
+    Ltrim(bufferTemp);
+    strcat(bufferDisplayMsg, bufferTemp);
+    // Enviando ao Lcd
+    Lcd_Out(1, 1, bufferDisplayMsg);
+    
+    // Formatando o buffer: "N-o" & Enviando ao LCD
+    // Soma 1 para que o usuário veja de 1 - N e não 0 - N-1
+    IntToStr(_testDisplay + 1, bufferTemp);
+    Lcd_Out(2, 1, bufferTemp);
+    Lcd_Out_Cp("-o");
+    Lcd_Out_Cp(" ");                        // Caso troque de um número com 2 dígitos para 1 digíto sobrescreve artefatos
 }
 
 void startTest()
@@ -409,7 +415,7 @@ void runningTest()
     
     // Calcula qual LED acender baseada no contador _ledToBlink
     // Ex: Se _ledToBlink for 2, pattern vira 000...0100
-    pattern = (1UL << _ledToBlink); 
+    pattern = (1UL << ledToBlink); 
 
     // Envia para os Shift Registers
     write32Bits(pattern);
@@ -419,12 +425,12 @@ void runningTest()
     Vdelay_ms(_testPeriodo);            
 
     // Prepara o próximo LED
-    _ledToBlink++; 
+    ledToBlink++; 
 
     // Verifica se chegou no fim (LED 32 não existe, vai de 0 a 31)
-    if (_ledToBlink >= 32) {
+    if (ledToBlink >= 32) {
         // Reseta para o começo (loop infinito)
-        _ledToBlink = 0;
+        ledToBlink = 0;
     }
 }
 
