@@ -79,8 +79,8 @@ typedef enum {
 volatile EncoderInput _currentInput = ENCODER_NONE;
 
 //*********************** VARIÁVEIS DE CONFUGURAÇÃO DO TESTE ***************************
-int _testPeriodo = 50;      // Quanto tempo de luz dar para cada led
-int _testDisplay = 1;       // Qual led vai ser o principal do test
+int _testPeriodo = 50;                  // Quanto tempo de luz dar para cada led
+int _testDisplay = 1;                   // Qual led vai ser o principal do test
 unsigned long _ledToBlink = 0;        // Qual led vai ser o próximo piscado
 
 //*********************** FUNÇÕES PARA RECEBER O INPUT DO MENU ***************************
@@ -395,7 +395,7 @@ void renderDisplayMenu()
     Lcd_Out_Cp("°");
 }
 
-void startLedTesting()
+void startTest()
 {
     clearLcd();
     Lcd_Out(1, 1, "Testando...");
@@ -461,19 +461,21 @@ void main() {
     // *************************** CORPO DO PROGRAMA ***************************
     LATE.B2 = 0; // Desliga o led de test
 
-    TRISC = 0x00; // All PORTC as output
+    // Configura todas as portas C como saída - responsáveis pelo controle dos LEDs
+    TRISC = 0x00;
     LATCH_PIN = 1;
 
     initLcd();
 
     while(1) {
-        // This is the core of the Finite State Machine
+        // Máquina de estados
         switch(currentState) {
-
+            // Dispositivo iniciado - pode ser
             case STATE_IDLE:
                 Lcd_Out(1, 1, "Dispositivo");
                 Lcd_Out(2, 1, "iniciado.");
             break;
+            // Menu de seleção
             case STATE_INIT_RENDER_MENU:
                 clearLcd();
                 currentState = STATE_SELECTING_MENU;
@@ -481,6 +483,7 @@ void main() {
             case STATE_SELECTING_MENU:
                 renderMenu();
             break;
+            // Menu de config - Período
             case STATE_INIT_CONFIG_PERIODO:
                 clearLcd();
                 currentState = STATE_CONFIG_PERIODO;
@@ -488,6 +491,7 @@ void main() {
             case STATE_CONFIG_PERIODO:
                 renderPeriodoMenu();
             break;
+            //  Menu de config - Display
             case STATE_INIT_CONFIG_DISPLAY:
                 clearLcd();
                 currentState = STATE_CONFIG_DISPLAY;
@@ -495,15 +499,17 @@ void main() {
             case STATE_CONFIG_DISPLAY:
                 renderDisplayMenu();
             break;
+            // Test
             case STATE_STARTING_TEST:
-                startLedTesting();
+                startTest();
                 currentState = STATE_RUNNING_TEST;
             break;
             case STATE_RUNNING_TEST:
                 runningTest();
             break;
+            // Inexistente
             default:
-                // Estado inexistente, programa deve ser encerrado.
+                // Estado inexistente, não pode ser alcançado.
                 break;
         }
 
