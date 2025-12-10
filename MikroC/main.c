@@ -13,8 +13,8 @@ Base de tempo de 1 ms -> Contador do timer0 (16 bits -  0 a 65536) inicia em    
                         b5 -> teste piscaled
 ***********************************************************/
 
-
 // *************************** MAPEAMENTO DE HARDWARE   ***************************
+
 sbit LCD_RS at RD4_bit;
 sbit LCD_EN at RD5_bit;
 sbit LCD_D4 at RD0_bit;
@@ -28,12 +28,6 @@ sbit LCD_D4_Direction at TRISD0_bit;
 sbit LCD_D5_Direction at TRISD1_bit;
 sbit LCD_D6_Direction at TRISD2_bit;
 sbit LCD_D7_Direction at TRISD3_bit;
-
-// *************************** Definições do shift register ***************************
-// Mapeamento do shift register: C0=Clock, C1=Data, C2=Latch
-#define CLOCK_PIN  LATC0_bit 
-#define LATCH_PIN  LATC1_bit
-#define DATA_PIN   LATC2_bit 
 
 //*********************** FUNÇÃO DE TESTE ***************************
 volatile int flag_blink = 0;
@@ -50,7 +44,6 @@ void blink()
 }
 
 //*********************** VARIAVEIS DE USO GLOBAL ***************************
-
 // Possive�s estados do programa
 typedef enum {
     STATE_IDLE,                         // Dispositivo iniciado mas sem nada a fazer
@@ -61,7 +54,10 @@ typedef enum {
     STATE_INIT_CONFIG_DISPLAY,          // Inicia o menu de configuracao do display
     STATE_CONFIG_DISPLAY,               // Configurando o display (qual dos N leds vai piscar)
     STATE_STARTING_TEST,                // Teste de reação iniciado
-    STATE_RUNNING_TEST,                // Teste de reação rodando
+    STATE_TEST_READY,                   // Teste está pronto para começar, basta o usuário apertar o botão (ainda não implementado)
+    STATE_RUNNING_TEST,                 // Teste de reação rodando
+    STATE_CALCULATE_TEST_RESULT,        // Usuário finalizou o teste
+    STATE_FINISHED_TEST,                // Usuário finalizou o teste
     STATE_ERROR
 } ProgramState;
 
@@ -79,9 +75,10 @@ typedef enum {
 volatile EncoderInput _currentInput = ENCODER_NONE;
 
 //*********************** VARIÁVEIS DE CONFUGURAÇÃO DO TESTE ***************************
+// Variáveis em millisegundos
 // Ambos _testPeriodo e _testDisplay não possuem unsigned pois isso quebra a lógica de wrap-arround
 const unsigned int _minPeriodo = 50;
-const unsigned int _maxPeriodo = 300;   
+const unsigned int _maxPeriodo = 1000;   
 const unsigned int _periodoStep = 50;   // De quanto em quanto sobe no menu
 int _testPeriodo = 100;                      // Quanto tempo de luz dar para cada led
 
@@ -159,26 +156,73 @@ const MenuOption menuItems[3] = {
     { "Iniciar     ", iniciar_onClick }
 };
 
+// *************************** DEFINIÇÕES DO CONTADOR DE TEMPO ***************************
+
+volatile int ledTimerCount = 0;             // Conta o tempo de exposição de cada led
+volatile int timeSinceTestStarted = 0;      // Conta o tempo desde o começo do teste
+volatile int timeMeantForUserReaction = 0;  // Marca o tempo esperado da reação do usuário
+volatile int reactionTimeDifference = 0;    // Calcula a diferença do tempo esperado e do tempo que o usuário reagiu
+
+// inicia contagem em 60536   - base de tempo de 1 ms
+#define TMR0_LOAD_HIGH  0xEC
+#define TMR0_LOAD_LOW   0x89
+
+void ReloadTimer0() {
+    TMR0H = TMR0_LOAD_HIGH;
+    TMR0L = TMR0_LOAD_LOW;
+}
+
+void PauseTimer0() {
+    GIE_bit = 0;
+}
+
+void UnpauseTimer0() {
+    GIE_bit = 1;
+}
 //*********************** INTERRUPCAO   ***************************
 void interrupt()
 {
+    int currentTimer;
+
     // -- Trata Interrupção timer0 --
     if(TMR0IF_bit)
     {
-        TMR0IF_bit=0x00;
-        // Recarrega o timer - TODO:conferir se realmente se faz necessário
-        TMR0H = 0xEC;
-        TMR0L = 0x89;
+        TMR0IF_bit  = 0x00;
+        ReloadTimer0();
+
+        timeSinceTestStarted++;
+        // Mais um ciclo concluído, próximo led
+        if(currentState == STATE_RUNNING_TEST) {
+            timeSinceTestStarted++; // Conta o tempo total do teste
+            ledTimerCount++;        // Conta o tempo para mudar o LED
+
+            if(ledTimerCount >= _testPeriodo){
+                PORTC++;           // Muda o LED
+                ledTimerCount = 0; // Reseta apenas o ritmo, mantendo o tempo total
+
+                if (PORTC >= _numLeds) { 
+                    PORTC = 0;  // Teste terminou sem reação do usuário, resetar o contador? Testar de novo começando do primeiro led? 
+                }
+            }
+        }
     }
 
     // -- Trata Interrupção Externa 0 -- Botão do teste
     if(INT0IF_bit)
     {
         INT0IF_bit = 0x00;
-        
-        if(ledToBlink == _testDisplay)
-        {
-            currentState = STATE_IDLE;
+
+        switch (currentState) {
+            case STATE_TEST_READY:
+                // Usuário apertou o botão de teste      
+                break;
+            case STATE_RUNNING_TEST:
+                // Usuário reagiu ao teste
+                // Já calcula o tempo para que outra interrupção do timer0 não afete a contagem
+                currentTimer = timeSinceTestStarted;
+                reactionTimeDifference = currentTimer - timeMeantForUserReaction;
+                currentState = STATE_CALCULATE_TEST_RESULT; 
+                break;
         }
     }
 
@@ -186,6 +230,7 @@ void interrupt()
     if(INT1IF_bit)
     {
         INT1IF_bit = 0x00;
+
         if(PORTB.B3 == 1) {
             _currentInput = ENCODER_UP;
         } else {
@@ -202,49 +247,19 @@ void interrupt()
             case STATE_IDLE:
                 currentState = STATE_INIT_RENDER_MENU;
             break;
-            // A partir deste ponto um if pode ser considerado mais limpo
+            // Lógica de selecionar a opcao do menu
             case STATE_SELECTING_MENU:
-                // Lógica de selecionar a opcao do menu
-                menuItems[selected].onClick();
-            break;
+            case STATE_CONFIG_DISPLAY:
             case STATE_CONFIG_PERIODO:
                 menuItems[selected].onClick();
             break;
-            case STATE_CONFIG_DISPLAY:
-                menuItems[selected].onClick();
+            // Para voltar ao menu de configuração ao fim do teste
+            case STATE_FINISHED_TEST:
+                currentState = STATE_IDLE;
             break;
         }
     }
 }
-
-
-//*********************** FUNÇÕES DO SHIFT REGISTER ***************************
-void clockLeds()
-{
-    CLOCK_PIN = 1;
-    CLOCK_PIN = 0;
-}
-
-void shiftOutByte(unsigned char data_byte) {
-    int i;
-    for(i = 0; i < 8; i++) {
-        if (data_byte & (1 << (7 - i))) {
-            DATA_PIN = 1;
-        } else {
-            DATA_PIN = 0;
-        }    
-        clockLeds();
-    }    
-}    
-
-void write32Bits(unsigned long number) {
-    LATCH_PIN = 0; 
-    shiftOutByte((number >> 24) & 0xFF); // Chip 4
-    shiftOutByte((number >> 16) & 0xFF); // Chip 3
-    shiftOutByte((number >> 8)  & 0xFF); // Chip 2
-    shiftOutByte(number & 0xFF);         // Chip 1
-    LATCH_PIN = 1; 
-}    
 
 //*********************** OUTRAS FUNÇÕES ***************************
 
@@ -356,7 +371,7 @@ void renderPeriodoMenu()
 
     Lcd_Out(1, 1, "Período: ");
     Lcd_Out(2, 1, periodoBuffer);
-    Lcd_Out_Cp(" ns ");
+    Lcd_Out_Cp(" ms ");
 }
 
 void renderDisplayMenu()
@@ -401,64 +416,16 @@ void renderDisplayMenu()
     Lcd_Out_Cp(" ");                        // Caso troque de um número com 2 dígitos para 1 digíto sobrescreve artefatos
 }
 
-void startTest()
-{
-    clearLcd();
-    Lcd_Out(1, 1, "Iniciando...");
-
-    // Acende todos os leds
-    write32Bits(0xFFFFFFFF); 
-    Vdelay_ms(_testPeriodo);   // Wait
-    
-    // Apaga todos os leds
-    write32Bits(0x00000000);   
-    Vdelay_ms(_testPeriodo);
-    
-    // Reseta contador de Leds
-    ledToBlink = 0;
-
-    Lcd_Out(1, 1, "Testando...  ");
-}
-
-void runningTest()
-{
-    // Variável para guardar o "desenho" dos bits
-    unsigned long pattern;
-    
-    // Calcula qual LED acender baseada no contador _ledToBlink
-    // Ex: Se _ledToBlink for 2, pattern vira 000...0100
-    pattern = (1UL << ledToBlink); 
-
-    // Liga um led
-    write32Bits(pattern);
-
-    // Espera o tempo configurado
-    // Nota: Vdelay aceita variaveis. Delay_ms precisa de constante.  -- TODO: Conversar com o Professor -- 
-    Vdelay_ms(_testPeriodo);
-
-    // Apaga o Led
-    write32Bits(0x00000000);
-
-    // Prepara o próximo LED
-    ledToBlink++; 
-
-    // Por enquanto continua em looping, mas deveria falahr o teste
-    if (ledToBlink >= 32) {
-        ledToBlink = 0;
-        // currentState = STATE_STARTING_TEST;
-    }
-}
-
 void main()
 {
+    char bufferTemp[16]; // Buffer temporário para conversões
         
     RCON.IPEN = 0;                              // Desabilita a prioridade de input, assim todas interrup��es rodam no interrupt() ignorando o interrupt_low() -- Conversar com professor --
     
     // *************************** REGISTRADORESA ***************************
     CMCON = 0x07;                               // Desabilita os comparadores
     T0CON = 0x88;                               //configura timer0  16 bits
-    TMR0H = 0xEC;
-    TMR0L = 0x89;                               // inicia contagem em 60536   - base de tempo de 1 ms
+    ReloadTimer0();
 
     ADCON1  = 0x0F;                             //Configura os pinos do PORTB como digitais   (00001111b).  Desabilita entradas anal�gicas
     INTCON  = 0xF0;                             //Habilita interrupção global e interrupção externa 0   0x90
@@ -481,21 +448,20 @@ void main()
     PORTC   = 0x00;                             // inicia porta C em low
 
     // *************************** CORPO DO PROGRAMA ***************************
-    LATE.B2 = 0; // Desliga o led de test
+    LATE.B2 = 0; // Desliga o led de teste
 
     // Configura todas as portas C como saída - responsáveis pelo controle dos LEDs
     TRISC = 0x00;
-    LATCH_PIN = 1;
 
     initLcd();
 
     while(1) {
         // Máquina de estados
         switch(currentState) {
-            // Dispositivo iniciado - pode ser
+            // Dispositivo iniciado
             case STATE_IDLE:
                 Lcd_Out(1, 1, "Dispositivo");
-                Lcd_Out(2, 1, "iniciado.");
+                Lcd_Out(2, 1, "iniciado...");
             break;
             // Menu de seleção
             case STATE_INIT_RENDER_MENU:
@@ -523,13 +489,46 @@ void main()
             break;
             // Test
             case STATE_STARTING_TEST:
-                startTest();
+                // Garante a interrupção do timer0 está disponível
+                TMR0IE_bit = 1;
+                
+                clearLcd();
+                Lcd_Out(1, 1, "Testando!");
+                // Pausa as interrupções para garantir que o tempo seja resetado com segurança
+                PauseTimer0();
+                ledTimerCount = 0;
+                timeSinceTestStarted = 0;
+                timeMeantForUserReaction = _testDisplay * _testPeriodo;
+                PORTC = 0;
+                // Reseta o contador novamente para que o primeiro ms seja contado por completo
+                ReloadTimer0();
                 currentState = STATE_RUNNING_TEST;
+                // Despausa
+                UnpauseTimer0();
             break;
+            case STATE_TEST_READY:
+                //
             case STATE_RUNNING_TEST:
-                runningTest();
+                //
             break;
-            // Inexistente
+            case STATE_CALCULATE_TEST_RESULT:
+                // Desliga as interrupções do timer0 para evitar uma race condition
+                PauseTimer0();
+
+                clearLcd();
+                Delay_ms(5);
+                IntToStr(reactionTimeDifference, bufferTemp);
+                Lcd_Out(1, 1, "Tempo: ");
+                Lcd_Out(2, 1, bufferTemp);
+                Lcd_Out_Cp(" ms");
+
+                currentState = STATE_FINISHED_TEST;
+         
+                UnpauseTimer0();
+            break;
+            case STATE_FINISHED_TEST:
+                //
+            break;
             default:
                 // Estado inexistente, não pode ser alcançado.
                 break;
@@ -543,5 +542,8 @@ void main()
             
             flag_blink = 0;
         }
+
+        // Garante maior estabilidade do programa
+        Delay_ms(10);
     }
 }
