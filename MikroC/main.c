@@ -300,7 +300,7 @@ void renderMenu()
     int op1;
     int op2;
     // Buffers na RAM
-    char linha1_buffer[17]; 
+    char linha1_buffer[17];
     char linha2_buffer[17];
 
     switch (getEncoderInput()) {
@@ -311,7 +311,7 @@ void renderMenu()
             selected++;
             break;
         default:
-            break; 
+            break;
     }
 
     // Para que as opções sejam válidas
@@ -341,7 +341,7 @@ void renderMenu()
     strcpy_ROM_to_RAM(linha1_buffer, menuItems[op1].name);
     strcpy_ROM_to_RAM(linha2_buffer, menuItems[op2].name);
 
-    Lcd_Out(1, 1, ">"); 
+    Lcd_Out(1, 1, ">");
     Lcd_Out(1, 2, linha1_buffer); // Passa o buffer da RAM
 
     Lcd_Out(2, 1, " ");
@@ -354,7 +354,7 @@ void renderPeriodoMenu()
 
     // Buffer de RAM para converter o número
     char periodoBuffer[7]; // Suficiente para "1000" e o nulo
-    
+
     switch (getEncoderInput()) {
         case ENCODER_UP:
             _testPeriodo += _periodoStep;
