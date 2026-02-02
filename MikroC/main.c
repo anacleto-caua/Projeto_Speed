@@ -78,13 +78,13 @@ volatile EncoderInput _currentInput = ENCODER_NONE;
 // Variáveis em millisegundos
 // Ambos _testPeriodo e _testDisplay não possuem unsigned pois isso quebra a lógica de wrap-arround
 const unsigned int _minPeriodo = 50;
-const unsigned int _maxPeriodo = 1000;   
+const unsigned int _maxPeriodo = 1000;
 const unsigned int _periodoStep = 50;   // De quanto em quanto sobe no menu
 int _testPeriodo = 100;                      // Quanto tempo de luz dar para cada led
 
 // 32 LEDS ENUMERADOS DE 0 A 31
 // Para o usuário será enumerado de 1 - 32 por simplicidade
-const unsigned int _numLeds = 32; 
+const unsigned int _numLeds = 32;
 unsigned long ledToBlink = 0;           // Qual led vai ser o próximo piscado
 int _testDisplay = 0;                       // Qual led vai ser o principal do teste
 
@@ -200,7 +200,7 @@ void interrupt()
                 PORTC++;           // Muda o LED
                 ledTimerCount = 0; // Reseta apenas o ritmo, mantendo o tempo total
 
-                if (PORTC >= _numLeds) { 
+                if (PORTC >= _numLeds) {
                     PORTC = 0;  // Teste terminou sem reação do usuário, resetar o contador? Testar de novo começando do primeiro led? 
                 }
             }
@@ -214,14 +214,14 @@ void interrupt()
 
         switch (currentState) {
             case STATE_TEST_READY:
-                // Usuário apertou o botão de teste      
+                // Usuário apertou o botão de teste
                 break;
             case STATE_RUNNING_TEST:
                 // Usuário reagiu ao teste
                 // Já calcula o tempo para que outra interrupção do timer0 não afete a contagem
                 currentTimer = timeSinceTestStarted;
                 reactionTimeDifference = currentTimer - timeMeantForUserReaction;
-                currentState = STATE_CALCULATE_TEST_RESULT; 
+                currentState = STATE_CALCULATE_TEST_RESULT;
                 break;
         }
     }
@@ -242,7 +242,7 @@ void interrupt()
     if(INT2IF_bit)
     {
         INT2IF_bit = 0x00;
-        
+
         switch(currentState){
             case STATE_IDLE:
                 currentState = STATE_INIT_RENDER_MENU;
@@ -280,7 +280,7 @@ void strcpy_ROM_to_RAM(char* ram_dest, const char* rom_src)
         *ram_dest++ = c;
     }
     // Adiciona o caractere nulo no final do buffer da RAM
-    *ram_dest = '\0'; 
+    *ram_dest = '\0';
 }
 
 void initLcd()
@@ -419,9 +419,9 @@ void renderDisplayMenu()
 void main()
 {
     char bufferTemp[16]; // Buffer temporário para conversões
-        
+
     RCON.IPEN = 0;                              // Desabilita a prioridade de input, assim todas interrup��es rodam no interrupt() ignorando o interrupt_low() -- Conversar com professor --
-    
+
     // *************************** REGISTRADORESA ***************************
     CMCON = 0x07;                               // Desabilita os comparadores
     T0CON = 0x88;                               //configura timer0  16 bits
@@ -491,7 +491,7 @@ void main()
             case STATE_STARTING_TEST:
                 // Garante a interrupção do timer0 está disponível
                 TMR0IE_bit = 1;
-                
+
                 clearLcd();
                 Lcd_Out(1, 1, "Testando!");
                 // Pausa as interrupções para garantir que o tempo seja resetado com segurança
@@ -523,7 +523,7 @@ void main()
                 Lcd_Out_Cp(" ms");
 
                 currentState = STATE_FINISHED_TEST;
-         
+
                 UnpauseTimer0();
             break;
             case STATE_FINISHED_TEST:
@@ -539,7 +539,7 @@ void main()
             LATE.B2=0X01;
             // delay_ms(200);
             LATE.B2=0X00;
-            
+
             flag_blink = 0;
         }
 
