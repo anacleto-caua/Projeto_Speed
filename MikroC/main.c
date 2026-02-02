@@ -159,7 +159,7 @@ const MenuOption menuItems[3] = {
 // *************************** DEFINIÇÕES DO CONTADOR DE TEMPO ***************************
 
 volatile int ledTimerCount = 0;             // Conta o tempo de exposição de cada led
-volatile int timeSinceTestStarted = 0;      // Conta o tempo desde o começo do teste
+volatile unsigned int timeSinceTestStarted = 0;      // Conta o tempo desde o começo do teste
 volatile int timeMeantForUserReaction = 0;  // Marca o tempo esperado da reação do usuário
 volatile int reactionTimeDifference = 0;    // Calcula a diferença do tempo esperado e do tempo que o usuário reagiu
 
