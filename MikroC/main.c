@@ -379,7 +379,7 @@ void renderDisplayMenu()
     const int displayMin = 0;
     const int displayMax = _numLeds - 1;
     // O valor que há de ser registrado está na variável global _testDisplay
-    
+
     // Buffers para saída de dados
     char bufferTemp[7];         // Buffer para conversões
     char bufferDisplayMsg[20];  // Suficiente para toda a extensão do display
@@ -392,10 +392,10 @@ void renderDisplayMenu()
             _testDisplay--;
             break;
     }
-    
+
     if (_testDisplay > displayMax)  _testDisplay = displayMin;
     if (_testDisplay < displayMin)  _testDisplay = displayMax;
-    
+
     // Formatando o buffer: "Display: 1 - 32"
     strcpy(bufferDisplayMsg, "Display: ");
     IntToStr(displayMin + 1, bufferTemp);
@@ -407,7 +407,7 @@ void renderDisplayMenu()
     strcat(bufferDisplayMsg, bufferTemp);
     // Enviando ao Lcd
     Lcd_Out(1, 1, bufferDisplayMsg);
-    
+
     // Formatando o buffer: "N-o" & Enviando ao LCD
     // Soma 1 para que o usuário veja de 1 - N e não 0 - N-1
     IntToStr(_testDisplay + 1, bufferTemp);
