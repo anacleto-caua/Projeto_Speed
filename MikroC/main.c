@@ -243,8 +243,10 @@ void interrupt()
     {
         INT2IF_bit = 0x00;
 
-        switch(currentState){
+        switch(currentState) {
+            // Abre o menu principal
             case STATE_IDLE:
+            case STATE_FINISHED_TEST:
                 currentState = STATE_INIT_RENDER_MENU;
             break;
             // Lógica de selecionar a opcao do menu
@@ -252,10 +254,6 @@ void interrupt()
             case STATE_CONFIG_DISPLAY:
             case STATE_CONFIG_PERIODO:
                 menuItems[selected].onClick();
-            break;
-            // Para voltar ao menu de configuração ao fim do teste
-            case STATE_FINISHED_TEST:
-                currentState = STATE_IDLE;
             break;
         }
     }
