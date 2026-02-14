@@ -167,6 +167,35 @@ volatile int reactionTimeDifference = 0;    // Calcula a diferença do tempo esp
 #define TMR0_LOAD_HIGH  0xEC
 #define TMR0_LOAD_LOW   0x89
 
+// --- Pinos de controle da bateria
+#define BAT_CTRL_PORT PORTA.B1
+#define BAT_CTRL_TRIS TRISA.B1
+
+// Função pra ler a bateria manualmente
+unsigned int Read_ADC_Manual() {
+    // Select Channel 0 (AN0)
+    // ADCON0 bits 5-2 definem o canal, canal AN0 = 00000
+    ADCON0.CHS0 = 0;
+    ADCON0.CHS1 = 0;
+    ADCON0.CHS2 = 0;
+    ADCON0.CHS3 = 0;
+
+    // Habilita o modulo ADC
+    ADCON0.ADON = 1;
+
+    // Delay para que os capcitores carreguem e seja feita uma boa leitura
+    Delay_us(20);
+
+    // Começa conversao ativando a flag GO
+    ADCON0.GO = 1;
+
+    // Espera a conversão terminar, o hardware reseta a flag
+    while (ADCON0.GO == 1);
+
+    // Return o resultado
+    return ((ADRESH << 8) + ADRESL);
+}
+
 void ReloadTimer0() {
     TMR0H = TMR0_LOAD_HIGH;
     TMR0L = TMR0_LOAD_LOW;
@@ -418,6 +447,12 @@ void main()
 {
     char bufferTemp[16]; // Buffer temporário para conversões
 
+    // Variavéis para testar a bateria
+    unsigned int adc_value;
+    float voltage;
+    unsigned int percent;
+    char txt[15];
+
     RCON.IPEN = 0;                              // Desabilita a prioridade de input, assim todas interrup��es rodam no interrupt() ignorando o interrupt_low() -- Conversar com professor --
 
     // *************************** REGISTRADORESA ***************************
@@ -445,13 +480,62 @@ void main()
     TRISE.B2= 0x00;                             //configura E2 como saída (pino 10 para teste)
     PORTC   = 0x00;                             // inicia porta C em low
 
-    // *************************** CORPO DO PROGRAMA ***************************
     LATE.B2 = 0; // Desliga o led de teste
 
-    // Configura todas as portas C como saída - responsáveis pelo controle dos LEDs
+    // ----------------- Configura todas as portas C como saída - responsáveis pelo controle dos LEDs
     TRISC = 0x00;
 
+    // ---------------- Configura pinos da bateria
+
+    // Habilita leituras manuais
+    ADCON2 = 0b10100101;
+
+    ADCON1 = 0x0E;          // Cofigura AN0 como analógico
+    TRISA.B0 = 1;           // Configura AN0 como entrada
+
+    BAT_CTRL_TRIS = 1;      // Configura pino como saída
+    BAT_CTRL_PORT = 1;      // Configura pino como alto
+
     initLcd();
+
+    // Teste para medir bateria, quebra o funcionamento normal do programa
+    while(1) {
+        // Liga o circuito de medida
+        BAT_CTRL_PORT = 0;   // Set Level LOW
+        BAT_CTRL_TRIS = 0;   // Set Direction as OUTPUT
+
+        // Le o valor
+        adc_value = Read_ADC_Manual();
+
+        // Desliga o circuito de medida -- economizar bateria
+        BAT_CTRL_TRIS = 1;
+
+        // Calcula Voltagem: (ADC * Vref / 4095) * Divid
+        voltage = (adc_value * 5.0 / 4095.0) * 2.0;
+
+        // Calcula a porcentagem
+        if (voltage >= 8.4) percent = 100;
+        else if (voltage <= 6.0) percent = 0;
+        else {
+            percent = (unsigned int)((voltage - 6.0) * (100.0 / 2.4));
+        }
+
+        // Mostra no lcd
+        Lcd_Cmd(_LCD_CLEAR);
+        Lcd_Out(1, 1, "Bat Voltage:");
+        FloatToStr(voltage, txt);
+        Lcd_Out(2, 1, txt);
+        Lcd_Out(2, 7, "V");
+
+        IntToStr(percentage, txt);
+        Lcd_Out(2, 10, txt);
+        Lcd_Out(2, 16, "%");
+
+        // Delay de 30 segundos como recomendado
+        Delay_ms(30000);
+    }
+
+    // *************************** CORPO DO PROGRAMA ***************************
 
     while(1) {
         // Máquina de estados
