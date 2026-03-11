@@ -167,33 +167,13 @@ volatile int reactionTimeDifference = 0;    // Calcula a diferença do tempo esp
 #define TMR0_LOAD_HIGH  0xEC
 #define TMR0_LOAD_LOW   0x89
 
-// --- Pinos de controle da bateria
-#define BAT_CTRL_PORT PORTA.B1
-#define BAT_CTRL_TRIS TRISA.B1
-
 // Função pra ler a bateria manualmente
 unsigned int Read_ADC_Manual() {
-    // Select Channel 0 (AN0)
-    // ADCON0 bits 5-2 definem o canal, canal AN0 = 00000
-    ADCON0.CHS0 = 0;
-    ADCON0.CHS1 = 0;
-    ADCON0.CHS2 = 0;
-    ADCON0.CHS3 = 0;
-
-    // Habilita o modulo ADC
-    ADCON0.ADON = 1;
-
-    // Delay para que os capcitores carreguem e seja feita uma boa leitura
+    ADCON0 = 0x01;
     Delay_us(20);
-
-    // Começa conversao ativando a flag GO
-    ADCON0.GO = 1;
-
-    // Espera a conversão terminar, o hardware reseta a flag
-    while (ADCON0.GO == 1);
-
-    // Return o resultado
-    return ((ADRESH << 8) + ADRESL);
+    GO_DONE_bit = 1;
+    while (GO_DONE_bit == 1);
+    return (((unsigned int)ADRESH << 8) | ADRESL);
 }
 
 void ReloadTimer0() {
@@ -446,10 +426,9 @@ void renderDisplayMenu()
 void main()
 {
     char bufferTemp[16]; // Buffer temporário para conversões
-
     // Variavéis para testar a bateria
-    unsigned int adc_value;
     float voltage;
+    volatile unsigned int adc_value;
     unsigned int percent;
     char txt[15];
 
@@ -487,31 +466,24 @@ void main()
 
     // ---------------- Configura pinos da bateria
 
-    // Habilita leituras manuais
-    ADCON2 = 0b10100101;
-
     ADCON1 = 0x0E;          // Cofigura AN0 como analógico
+    ADCON2 = 0b10100101;    // Habilita leituras manuais
     TRISA.B0 = 1;           // Configura AN0 como entrada
-
-    BAT_CTRL_TRIS = 1;      // Configura pino como saída
-    BAT_CTRL_PORT = 1;      // Configura pino como alto
 
     initLcd();
 
     // Teste para medir bateria, quebra o funcionamento normal do programa
     while(1) {
         // Liga o circuito de medida
-        BAT_CTRL_PORT = 0;   // Set Level LOW
-        BAT_CTRL_TRIS = 0;   // Set Direction as OUTPUT
+        Delay_ms(20);
 
         // Le o valor
         adc_value = Read_ADC_Manual();
 
         // Desliga o circuito de medida -- economizar bateria
-        BAT_CTRL_TRIS = 1;
 
         // Calcula Voltagem: (ADC * Vref / 4095) * Divid
-        voltage = (adc_value * 5.0 / 4095.0) * 2.0;
+        voltage = ((float)(adc_value) * 5.0 / 4095.0) * 2.0;
 
         // Calcula a porcentagem
         if (voltage >= 8.4) percent = 100;
@@ -527,7 +499,8 @@ void main()
         Lcd_Out(2, 1, txt);
         Lcd_Out(2, 7, "V");
 
-        IntToStr(percentage, txt);
+        IntToStr(percent, txt);
+        Ltrim(txt);
         Lcd_Out(2, 10, txt);
         Lcd_Out(2, 16, "%");
 
