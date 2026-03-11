@@ -146,14 +146,14 @@ typedef struct {
 
 // Variável que indica qual opção do menu está selecionada
 int selected = 0;
-// Número de opções do menu
+
+// Atualmente o menu não suporta mais opções que linhas no display lcd.
 const int numMenuItems = 3;
-// Array com as opções do menu
 const MenuOption menuItems[3] = {
     // Os espa�os no nome s�o pra sobrescrever o buffer, e n�o deixar a �ltima letra da maior palavra ocupando espa�o. TODO: produzir uma solu��o mais sofisticada
-    { "Período     ", periodo_onClick },
-    { "Display     ", display_onClick },
-    { "Iniciar     ", iniciar_onClick }
+    { "Período", periodo_onClick },
+    { "Display", display_onClick },
+    { "Iniciar", iniciar_onClick }
 };
 
 // *************************** DEFINIÇÕES DO CONTADOR DE TEMPO ***************************
@@ -297,18 +297,23 @@ void initLcd()
     Lcd_Cmd(_LCD_CURSOR_OFF);          // Desliga o cursor
 }
 
-void clearLcd()
-{
+void clearLcd() {
     Lcd_Cmd(_LCD_CLEAR);
 }
 
-void renderMenu()
-{
-    int op1;
-    int op2;
-    // Buffers na RAM
-    char linha1_buffer[17];
-    char linha2_buffer[17];
+void renderMenu() {
+    const LCD_COLlUMN_COUNT = 20;
+    // Buffer na RAM
+    int i;
+    char lcd_line_buffer[LCD_COLlUMN_COUNT];
+
+    /*
+    // Variavéis para testar a bateria
+    float voltage;
+    volatile unsigned int adc_value;
+    unsigned int percent;
+    char txt[15];
+    */
 
     switch (getEncoderInput()) {
         case ENCODER_UP:
@@ -321,38 +326,53 @@ void renderMenu()
             break;
     }
 
-    // Para que as opções sejam válidas
-    op1 = selected;
-    op2 = selected + 1;
-
-    if(selected < 0)
-    {
+    // Clamping
+    if(selected < 0) {
         selected = numMenuItems - 1;
-        op1 = selected;
-        op2 = 0;
     }
-    else if(selected >= numMenuItems)
-    {
+    else if(selected >= numMenuItems) {
         selected = 0;
-        op1 = 0;
-        op2 = 1;
-    }
-    else if(selected == numMenuItems - 1)
-    {
-        selected = numMenuItems - 1;
-        op1 = numMenuItems - 1;
-        op2 = 0;
     }
 
-    // Copia da ROM para a RAM usando NOSSA função
-    strcpy_ROM_to_RAM(linha1_buffer, menuItems[op1].name);
-    strcpy_ROM_to_RAM(linha2_buffer, menuItems[op2].name);
+    // Draw menu
+    for (i = 0; i < numMenuItems; i++) {
+        memset(&lcd_line_buffer, ' ', LCD_COLLUMN_COUNT);
+        strcpy_ROM_to_RAM(lcd_line_buffer, menuItems[i].name);
+        Lcd_Out(i+1, 2, lcd_line_buffer);
 
-    Lcd_Out(1, 1, ">");
-    Lcd_Out(1, 2, linha1_buffer); // Passa o buffer da RAM
+        if (i == selected) {
+            Lcd_Out(i+1, 1, ">");
+        } else {
+            Lcd_Out(i+1, 1, " ");
+        }
+    }
 
-    Lcd_Out(2, 1, " ");
-    Lcd_Out(2, 2, linha2_buffer); // Passa o buffer da RAM
+    /*
+    // Le o valor
+    adc_value = Read_ADC_Manual();
+
+    // Calcula Voltagem: (ADC * Vref / 4095) * Divid
+    voltage = ((float)(adc_value) * 5.0 / 4095.0) * 2.0;
+
+    // Calcula a porcentagem
+    if (voltage >= 8.4) percent = 100;
+    else if (voltage <= 6.0) percent = 0;
+    else {
+        percent = (unsigned int)((voltage - 6.0) * (100.0 / 2.4));
+    }
+
+    // Mostra no lcd
+    Lcd_Cmd(_LCD_CLEAR);
+    Lcd_Out(1, 1, "Bat Voltage:");
+    FloatToStr(voltage, txt);
+    Lcd_Out(2, 1, txt);
+    Lcd_Out(2, 7, "V");
+
+    IntToStr(percent, txt);
+    Ltrim(txt);
+    Lcd_Out(2, 10, txt);
+    Lcd_Out(2, 16, "%");
+    */
 }
 
 void renderPeriodoMenu()
@@ -426,11 +446,7 @@ void renderDisplayMenu()
 void main()
 {
     char bufferTemp[16]; // Buffer temporário para conversões
-    // Variavéis para testar a bateria
-    float voltage;
-    volatile unsigned int adc_value;
-    unsigned int percent;
-    char txt[15];
+
 
     RCON.IPEN = 0;                              // Desabilita a prioridade de input, assim todas interrup��es rodam no interrupt() ignorando o interrupt_low() -- Conversar com professor --
 
@@ -471,42 +487,6 @@ void main()
     TRISA.B0 = 1;           // Configura AN0 como entrada
 
     initLcd();
-
-    // Teste para medir bateria, quebra o funcionamento normal do programa
-    while(1) {
-        // Liga o circuito de medida
-        Delay_ms(20);
-
-        // Le o valor
-        adc_value = Read_ADC_Manual();
-
-        // Desliga o circuito de medida -- economizar bateria
-
-        // Calcula Voltagem: (ADC * Vref / 4095) * Divid
-        voltage = ((float)(adc_value) * 5.0 / 4095.0) * 2.0;
-
-        // Calcula a porcentagem
-        if (voltage >= 8.4) percent = 100;
-        else if (voltage <= 6.0) percent = 0;
-        else {
-            percent = (unsigned int)((voltage - 6.0) * (100.0 / 2.4));
-        }
-
-        // Mostra no lcd
-        Lcd_Cmd(_LCD_CLEAR);
-        Lcd_Out(1, 1, "Bat Voltage:");
-        FloatToStr(voltage, txt);
-        Lcd_Out(2, 1, txt);
-        Lcd_Out(2, 7, "V");
-
-        IntToStr(percent, txt);
-        Ltrim(txt);
-        Lcd_Out(2, 10, txt);
-        Lcd_Out(2, 16, "%");
-
-        // Delay de 30 segundos como recomendado
-        Delay_ms(30000);
-    }
 
     // *************************** CORPO DO PROGRAMA ***************************
 
