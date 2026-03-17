@@ -1,4 +1,4 @@
-        /* *********************************************************
+/* *********************************************************
 Cristal 20 MHz (5 MHz)
 Ciclo de máquina 200nS
 Base de tempo de 1 ms -> Contador do timer0 (16 bits -  0 a 65536) inicia em    60536
@@ -32,13 +32,10 @@ sbit LCD_D7_Direction at TRISD3_bit;
 //*********************** FUNÇÃO DE TESTE ***************************
 volatile int flag_blink = 0;
 // Função apenas para teste
-void blink()
-{
-    if(flag_blink){
+void blink() {
+    if(flag_blink) {
         flag_blink = 0;
-    }
-    else
-    {
+    } else {
         flag_blink = 1;
     }
 }
@@ -189,13 +186,11 @@ void UnpauseTimer0() {
     GIE_bit = 1;
 }
 //*********************** INTERRUPCAO   ***************************
-void interrupt()
-{
+void interrupt() {
     int currentTimer;
 
     // -- Trata Interrupção timer0 --
-    if(TMR0IF_bit)
-    {
+    if(TMR0IF_bit) {
         TMR0IF_bit  = 0x00;
         ReloadTimer0();
 
@@ -217,8 +212,7 @@ void interrupt()
     }
 
     // -- Trata Interrupção Externa 0 -- Botão do teste
-    if(INT0IF_bit)
-    {
+    if(INT0IF_bit) {
         INT0IF_bit = 0x00;
 
         switch (currentState) {
@@ -236,8 +230,7 @@ void interrupt()
     }
 
     // -- Trata Interrupção Externa 1 -- Clock do encoder
-    if(INT1IF_bit)
-    {
+    if(INT1IF_bit) {
         INT1IF_bit = 0x00;
 
         if(PORTB.B3 == 1) {
@@ -271,16 +264,14 @@ void interrupt()
 //*********************** OUTRAS FUNÇÕES ***************************
 
 // Função para garantir que sempre que a entrada do encoder for lida ela seja resetada
-EncoderInput getEncoderInput()
-{
+EncoderInput getEncoderInput() {
     EncoderInput oldInput = _currentInput;
     _currentInput = ENCODER_NONE; // Reseta a entrada do encoder
     return  oldInput;
 }
 
 // TODO: Considerar uma solução mais robusta e limpa ao invés dessa função para acessar a ROM
-void strcpy_ROM_to_RAM(char* ram_dest, const char* rom_src)
-{
+void strcpy_ROM_to_RAM(char* ram_dest, const char* rom_src) {
     char c;
     // Loop até encontrar o caractere nulo '\0'
     while (c = *rom_src++) {
@@ -290,8 +281,7 @@ void strcpy_ROM_to_RAM(char* ram_dest, const char* rom_src)
     *ram_dest = '\0';
 }
 
-void initLcd()
-{
+void initLcd() {
     Lcd_Init();
     Lcd_Cmd(_LCD_CLEAR);               // Limpa o display
     Lcd_Cmd(_LCD_CURSOR_OFF);          // Desliga o cursor
@@ -302,18 +292,15 @@ void clearLcd() {
 }
 
 void renderMenu() {
-    const LCD_COLlUMN_COUNT = 20;
+    const LCD_COLLUMN_COUNT = 20;
     // Buffer na RAM
     int i;
-    char lcd_line_buffer[LCD_COLlUMN_COUNT];
+    char lcd_line_buffer[LCD_COLLUMN_COUNT];
 
-    /*
     // Variavéis para testar a bateria
     float voltage;
     volatile unsigned int adc_value;
     unsigned int percent;
-    char txt[15];
-    */
 
     switch (getEncoderInput()) {
         case ENCODER_UP:
@@ -347,7 +334,7 @@ void renderMenu() {
         }
     }
 
-    /*
+    // Le a bateria
     // Le o valor
     adc_value = Read_ADC_Manual();
 
@@ -362,21 +349,13 @@ void renderMenu() {
     }
 
     // Mostra no lcd
-    Lcd_Cmd(_LCD_CLEAR);
-    Lcd_Out(1, 1, "Bat Voltage:");
-    FloatToStr(voltage, txt);
-    Lcd_Out(2, 1, txt);
-    Lcd_Out(2, 7, "V");
-
-    IntToStr(percent, txt);
-    Ltrim(txt);
-    Lcd_Out(2, 10, txt);
-    Lcd_Out(2, 16, "%");
-    */
+    IntToStr(percent, lcd_line_buffer);
+    Ltrim(lcd_line_buffer);
+    Lcd_Out(4, (LCD_COLLUMN_COUNT - 3), lcd_line_buffer);
+    Lcd_Out(4, LCD_COLLUMN_COUNT, "%");
 }
 
-void renderPeriodoMenu()
-{
+void renderPeriodoMenu() {
     // O valor que há de ser registrado está na variável global _testPeriodo
 
     // Buffer de RAM para converter o número
@@ -401,8 +380,7 @@ void renderPeriodoMenu()
     Lcd_Out_Cp(" ms ");
 }
 
-void renderDisplayMenu()
-{
+void renderDisplayMenu() {
     const int displayMin = 0;
     const int displayMax = _numLeds - 1;
     // O valor que há de ser registrado está na variável global _testDisplay
@@ -443,8 +421,7 @@ void renderDisplayMenu()
     Lcd_Out_Cp(" ");                        // Caso troque de um número com 2 dígitos para 1 digíto sobrescreve artefatos
 }
 
-void main()
-{
+void main() {
     char bufferTemp[16]; // Buffer temporário para conversões
 
 
