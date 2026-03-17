@@ -185,6 +185,7 @@ void PauseTimer0() {
 void UnpauseTimer0() {
     GIE_bit = 1;
 }
+
 //*********************** INTERRUPCAO   ***************************
 void interrupt() {
     int currentTimer;
@@ -198,14 +199,18 @@ void interrupt() {
         // Mais um ciclo concluído, próximo led
         if(currentState == STATE_RUNNING_TEST) {
             timeSinceTestStarted++; // Conta o tempo total do teste
-            ledTimerCount++;        // Conta o tempo para mudar o LED
+            ledTimerCou nt++;        // Conta o tempo para mudar o LED
 
             if(ledTimerCount >= _testPeriodo){
                 PORTC++;           // Muda o LED
                 ledTimerCount = 0; // Reseta apenas o ritmo, mantendo o tempo total
 
                 if (PORTC >= _numLeds) {
-                    PORTC = 0;  // Teste terminou sem reação do usuário, resetar o contador? Testar de novo começando do primeiro led? 
+                    PORTC = 0;
+                    // Teste terminou sem reação do usuário, calcula o tempo de reação assim mesmo
+                    currentTimer = timeSinceTestStarted;
+                    reactionTimeDifference = timeSinceTestStarted - timeMeantForUserReaction;
+                    currentState = STATE_CALCULATE_TEST_RESULT;
                 }
             }
         }
@@ -217,13 +222,13 @@ void interrupt() {
 
         switch (currentState) {
             case STATE_TEST_READY:
-                // Usuário apertou o botão de teste
+                currentState = STATE_RUNNING_TEST;
                 break;
             case STATE_RUNNING_TEST:
                 // Usuário reagiu ao teste
                 // Já calcula o tempo para que outra interrupção do timer0 não afete a contagem
                 currentTimer = timeSinceTestStarted;
-                reactionTimeDifference = currentTimer - timeMeantForUserReaction;
+                reactionTimeDifference = timeSinceTestStarted - timeMeantForUserReaction;
                 currentState = STATE_CALCULATE_TEST_RESULT;
                 break;
         }
@@ -515,12 +520,14 @@ void main() {
                 PORTC = 0;
                 // Reseta o contador novamente para que o primeiro ms seja contado por completo
                 ReloadTimer0();
-                currentState = STATE_RUNNING_TEST;
+                currentState = STATE_TEST_READY;
                 // Despausa
                 UnpauseTimer0();
             break;
             case STATE_TEST_READY:
-                //
+                Lcd_Out(1, 1, "Teste pronto.");
+                Lcd_Out(2, 1, "Aperte o botão de teste");
+                Lcd_Out(3, 1, "para começar");
             case STATE_RUNNING_TEST:
                 //
             break;
