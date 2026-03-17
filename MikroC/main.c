@@ -41,6 +41,11 @@ void blink() {
 }
 
 //*********************** VARIAVEIS DE USO GLOBAL ***************************
+
+// Definições do LCD
+#define LCD_COLLUMN_COUNT  20
+#define LCD_LINE_COUNT  4
+
 // Possive�s estados do programa
 typedef enum {
     STATE_IDLE,                         // Dispositivo iniciado mas sem nada a fazer
@@ -50,8 +55,9 @@ typedef enum {
     STATE_CONFIG_PERIODO,               // Configurando o período (tempo entre um led e outro piscar)
     STATE_INIT_CONFIG_DISPLAY,          // Inicia o menu de configuracao do display
     STATE_CONFIG_DISPLAY,               // Configurando o display (qual dos N leds vai piscar)
-    STATE_STARTING_TEST,                // Teste de reação iniciado
-    STATE_TEST_READY,                   // Teste está pronto para começar, basta o usuário apertar o botão (ainda não implementado)
+    STATE_STARTING_TEST,                // Prepara o teste, comunica o usuário para apertar o botão
+    STATE_TEST_READY,                   // Teste está pronto para começar, basta o usuário apertar o botão
+    STATE_TEST_BEGIN,                   // Teste de reação iniciado
     STATE_RUNNING_TEST,                 // Teste de reação rodando
     STATE_CALCULATE_TEST_RESULT,        // Usuário finalizou o teste
     STATE_FINISHED_TEST,                // Usuário finalizou o teste
@@ -76,16 +82,17 @@ volatile EncoderInput _currentInput = ENCODER_NONE;
 // Ambos _testPeriodo e _testDisplay não possuem unsigned pois isso quebra a lógica de wrap-arround
 const unsigned int _minPeriodo = 50;
 const unsigned int _maxPeriodo = 1000;
+
 const unsigned int _periodoStep = 50;   // De quanto em quanto sobe no menu
-int _testPeriodo = 100;                      // Quanto tempo de luz dar para cada led
+int _testPeriodo = 300;                 // Quanto tempo de luz dar para cada led
 
 // 32 LEDS ENUMERADOS DE 0 A 31
 // Para o usuário será enumerado de 1 - 32 por simplicidade
-const unsigned int _numLeds = 32;
+const unsigned int _numLeds = 16;
 unsigned long ledToBlink = 0;           // Qual led vai ser o próximo piscado
 int _testDisplay = 0;                       // Qual led vai ser o principal do teste
 
-//*********************** FUNÇÕES PARA RECEBER O INPUT DO MENU ***************************
+//*********************** FUNÇÕES PARA R
 // TODO: Considerar levar essa função para outro arquivo, por organização
 // Tem de ser declaradas antes de serem utilizadas pelo menuItems
 
@@ -132,7 +139,6 @@ void iniciar_onClick() {
 
 //*********************** OUTRAS VARIÁVEIS LIGADAS AO MENU ***************************
 // Ponteiros para funções de cada estado do menu
-// 'onClickFunc' é um ponteiro para uma função sem parâmetros que retorna void.
 typedef void (*onClickFunc)(void);
 
 // Struct para definir das possiveís opções do menu
@@ -199,7 +205,7 @@ void interrupt() {
         // Mais um ciclo concluído, próximo led
         if(currentState == STATE_RUNNING_TEST) {
             timeSinceTestStarted++; // Conta o tempo total do teste
-            ledTimerCou nt++;        // Conta o tempo para mudar o LED
+            ledTimerCount++;        // Conta o tempo para mudar o LED
 
             if(ledTimerCount >= _testPeriodo){
                 PORTC++;           // Muda o LED
@@ -222,7 +228,7 @@ void interrupt() {
 
         switch (currentState) {
             case STATE_TEST_READY:
-                currentState = STATE_RUNNING_TEST;
+                currentState = STATE_TEST_BEGIN;
                 break;
             case STATE_RUNNING_TEST:
                 // Usuário reagiu ao teste
@@ -296,7 +302,6 @@ void clearLcd() {
 }
 
 void renderMenu() {
-    const LCD_COLLUMN_COUNT = 20;
     // Buffer na RAM
     int i;
     char lcd_line_buffer[LCD_COLLUMN_COUNT];
@@ -426,8 +431,8 @@ void renderDisplayMenu() {
 }
 
 void main() {
-    char bufferTemp[16]; // Buffer temporário para conversões
-
+    char lcd_line_buffer[LCD_COLLUMN_COUNT];    // Buffer para escrever na tela
+    char conversions_buffer[10];                // Buffer temporário para conversões
 
     RCON.IPEN = 0;                              // Desabilita a prioridade de input, assim todas interrup��es rodam no interrupt() ignorando o interrupt_low() -- Conversar com professor --
 
@@ -446,7 +451,7 @@ void main() {
     RBPU_bit = 0;          // 0 = Habilita pull-ups do PORTB
 
     // -- Registrador INTCON3 (pag 97 datasheet) --
-    INT0IE_bit  = 0x00;                         //Habilita interrupção externa 0
+    INT0IE_bit  = 0x01;                         //Habilita interrupção externa 0
     INT1IE_bit  = 0x01;                         //Habilita interrupção externa 1
     INT2IE_bit  = 0x01;                         //Habilita interrupção externa 2
 
@@ -466,6 +471,8 @@ void main() {
     ADCON1 = 0x0E;          // Cofigura AN0 como analógico
     ADCON2 = 0b10100101;    // Habilita leituras manuais
     TRISA.B0 = 1;           // Configura AN0 como entrada
+
+    GIE_BIT = 1;            // Liga as interrupções
 
     initLcd();
 
@@ -507,27 +514,37 @@ void main() {
             break;
             // Test
             case STATE_STARTING_TEST:
-                // Garante a interrupção do timer0 está disponível
-                TMR0IE_bit = 1;
+                // Desliga a interrupção Timer0
+                TMR0IE_bit = 0;
 
                 clearLcd();
-                Lcd_Out(1, 1, "Testando!");
+
+                Lcd_Out(1, 1, "Teste pronto.");
+                Lcd_Out(2, 1, "Aperte o botão de teste");
+                Lcd_Out(3, 1, "para começar");
+
                 // Pausa as interrupções para garantir que o tempo seja resetado com segurança
-                PauseTimer0();
                 ledTimerCount = 0;
                 timeSinceTestStarted = 0;
                 timeMeantForUserReaction = _testDisplay * _testPeriodo;
                 PORTC = 0;
                 // Reseta o contador novamente para que o primeiro ms seja contado por completo
                 ReloadTimer0();
+
                 currentState = STATE_TEST_READY;
-                // Despausa
-                UnpauseTimer0();
             break;
             case STATE_TEST_READY:
-                Lcd_Out(1, 1, "Teste pronto.");
-                Lcd_Out(2, 1, "Aperte o botão de teste");
-                Lcd_Out(3, 1, "para começar");
+                // ...
+            break;
+            case STATE_TEST_BEGIN:
+                // Libera o interrupção Timer0
+                TMR0IE_bit = 1;
+
+                clearLcd();
+                Lcd_Out(1, 1, "Testando...");
+                currentState = STATE_RUNNING_TEST;
+
+            break;
             case STATE_RUNNING_TEST:
                 //
             break;
@@ -536,12 +553,19 @@ void main() {
                 PauseTimer0();
 
                 clearLcd();
-                Delay_ms(5);
-                IntToStr(reactionTimeDifference, bufferTemp);
-                Lcd_Out(1, 1, "Tempo: ");
-                Lcd_Out(2, 1, bufferTemp);
-                Lcd_Out_Cp(" ms");
+                Delay_ms(5); // Garante que o tempo do teste foi calculado pela interrupção
 
+                memset(&lcd_line_buffer, ' ', LCD_COLLUMN_COUNT);
+                strcpy(lcd_line_buffer, "Reação: ");
+
+                //reactionTimeDifference = 2909;
+                IntToStr(reactionTimeDifference, conversions_buffer);
+                Ltrim(conversions_buffer);
+
+                strcat(lcd_line_buffer, conversions_buffer);
+                strcat(lcd_line_buffer, " ms");
+
+                Lcd_Out(1, 1, lcd_line_buffer);
                 currentState = STATE_FINISHED_TEST;
 
                 UnpauseTimer0();
