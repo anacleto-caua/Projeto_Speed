@@ -247,7 +247,6 @@ void interrupt() {
 
         switch(currentState) {
             // Abre o menu principal
-            case STATE_IDLE:
             case STATE_FINISHED_TEST:
                 currentState = STATE_INIT_RENDER_MENU;
             break;
@@ -472,8 +471,10 @@ void main() {
         switch(currentState) {
             // Dispositivo iniciado
             case STATE_IDLE:
-                Lcd_Out(1, 1, "Dispositivo");
-                Lcd_Out(2, 1, "iniciado...");
+                // Inutilizado atualmente
+                currentState = STATE_INIT_RENDER_MENU;
+                //Lcd_Out(1, 1, "Dispositivo");
+                //Lcd_Out(2, 1, "iniciado...");
             break;
             // Menu de seleção
             case STATE_INIT_RENDER_MENU:
