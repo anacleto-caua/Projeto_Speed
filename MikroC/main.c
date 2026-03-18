@@ -476,6 +476,22 @@ void main() {
 
     initLcd();
 
+    UART1_Init(9600);
+    Delay_ms(100);
+
+    while(1) {
+        UART1_Write('A');
+        Delay_ms(1000);
+
+        if (UART1_Data_Ready() == 1) {
+            conversions_buffer[0] = UART1_Read();
+
+            Lcd_Out(1, 1, conversions_buffer[0]);
+
+            //UART1_Write(data);
+        }
+    }
+
     // *************************** CORPO DO PROGRAMA ***************************
 
     while(1) {
