@@ -1,3 +1,4 @@
+
 /* *********************************************************
 Cristal 20 MHz (5 MHz)
 Ciclo de máquina 200nS
@@ -280,6 +281,53 @@ EncoderInput getEncoderInput() {
     return  oldInput;
 }
 
+void bl_send_package(char* src, int package_size) {
+    int i = 0;
+    UART1_Write('<');
+
+    for (i = 0; i < package_size; i++) {
+        UART1_Write(*src);
+        src++;
+    }
+
+    UART1_Write('>');
+}
+
+void bl_recv_package(char* dst, int package_size) {
+    int began_receiving = 0;
+    char byte;
+    int received = 0;
+
+    while(1) {
+        if (UART1_Data_Ready() == 1) {
+            byte = UART1_Read();
+            switch (byte) {
+                case '<':{
+                        began_receiving = 1;
+                    }
+                    break;
+                case '>':{
+                        if (began_receiving == 1) {
+                            if (received != package_size) {
+                                // Invalid package, restart receiving
+                                received = 0;
+                                began_receiving = 0;
+                            } else {
+                                return;
+                            }
+                        }
+                    }
+                    break;
+                default: {
+                        *(dst+received) = byte;
+                        received++;
+                    }
+                    break;
+            }
+        }
+    }
+}
+
 // TODO: Considerar uma solução mais robusta e limpa ao invés dessa função para acessar a ROM
 void strcpy_ROM_to_RAM(char* ram_dest, const char* rom_src) {
     char c;
@@ -476,21 +524,9 @@ void main() {
 
     initLcd();
 
+    // Init bluetooth module
     UART1_Init(9600);
     Delay_ms(100);
-
-    while(1) {
-        UART1_Write('A');
-        Delay_ms(1000);
-
-        if (UART1_Data_Ready() == 1) {
-            conversions_buffer[0] = UART1_Read();
-
-            Lcd_Out(1, 1, conversions_buffer[0]);
-
-            //UART1_Write(data);
-        }
-    }
 
     // *************************** CORPO DO PROGRAMA ***************************
 
