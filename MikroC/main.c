@@ -14,6 +14,18 @@ Base de tempo de 1 ms -> Contador do timer0 (16 bits -  0 a 65536) inicia em    
                         b5 -> teste piscaled
 ***********************************************************/
 
+// ******************************** TIPOS PADRÃO *********************************
+
+typedef unsigned char      u8;
+typedef signed char        i8;
+
+typedef unsigned int       u16;
+typedef signed int         i16;
+
+typedef unsigned long      u32;
+typedef signed long        i32;
+
+
 // *************************** MAPEAMENTO DE HARDWARE   ***************************
 
 sbit LCD_RS at RD4_bit;
