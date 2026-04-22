@@ -23,8 +23,12 @@ typedef struct {
     u8 Length;        // Tamanho da string calculado no tempo de compilação
 } StrView;
 
-// Macro para gerar a view em comptime
+// Macro para gerar a string view em comptime
 #define MAKE_VIEW(str) { str, sizeof(str) - 1 }
+
+// Macros para converter constantes numéricas em texto no tempo de compilação
+#define STR_HELPER(x) #x
+#define STR(x) STR_HELPER(x)
 
 // Mapeamento do LCD
 #define LCD_COLLUMN_COUNT 20
@@ -73,9 +77,6 @@ sbit LCD_D7_Direction at TRISD3_bit;
 // Flag de estado do programa
 volatile u8 ProgramState = STATE_IDLE;
 
-// Input do encoder
-volatile u8 EncoderInput = 0;
-
 // Variáveis de teste
 // Variáveis em millisegundos
 #define MIN_PERIODO 50      // u16
@@ -88,7 +89,7 @@ i16 TestPeriodo = 500;    // Quanto tempo de luz dar para cada led
 // Para o usuário será enumerado de 1 - 32 por simplicidade
 #define NUM_LEDS 32     // u8
 u8 CurrentLed = 0;      // Qual led está acesso
-u8 TargetLed  = 0;      // Qual led vai ser o principal do teste
+i8 TargetLed  = 0;      // Qual led vai ser o principal do teste
 
 // Menu
 // --- Item Período ---
@@ -150,7 +151,16 @@ const MenuOption MenuItems[NUM_MENU_ITEMS] = {
 };
 
 // Variável que indica qual opção do menu está selecionada
-u8 SelectedMenuOption = 0;
+i8 SelectedMenuOption = 0;
+
+// Input do encoder
+volatile i8 EncoderInput = 0;
+
+i8 getEncoderInput() {
+    i8 n = EncoderInput;
+    EncoderInput = 0;
+    return n;
+}
 
 // Definições do contador
 u16 LedExposition = 0;                      // Conta o tempo de exposição de cada led
@@ -327,7 +337,7 @@ void renderMenu() {
     volatile u32 adc_value;
     u8 percent;
 
-    SelectedMenuOption += EncoderInput;
+    SelectedMenuOption += getEncoderInput();
 
     // Clamping
     if(SelectedMenuOption < 0) {
@@ -340,7 +350,7 @@ void renderMenu() {
     // Draw menu
     for (i = 0; i < NUM_MENU_ITEMS; i++) {
         memset(&lcd_line_buffer, ' ', LCD_COLLUMN_COUNT);
-        strcpy_ROM_to_RAM(lcd_line_buffer, MenuItems[i].Name->Data);
+        strcpy_ROM_to_RAM(lcd_line_buffer, MenuItems[i].Name.Data);
         Lcd_Out(i+1, 2, lcd_line_buffer);
 
         if (i == SelectedMenuOption) {
@@ -371,12 +381,10 @@ void renderMenu() {
 }
 
 void renderPeriodoMenu() {
-    // O valor que há de ser registrado está na variável global _testPeriodo
-
     // Buffer de RAM para converter o número
     char periodo_buffer[7]; // Suficiente para "1000" e o nulo
 
-    SelectedMenuOption += EncoderInput * PERIODO_STEP;
+    TestPeriodo += getEncoderInput() * PERIODO_STEP;
 
     if (TestPeriodo > MAX_PERIODO) TestPeriodo = MIN_PERIODO;
     if (TestPeriodo < MIN_PERIODO) TestPeriodo = MAX_PERIODO;
@@ -389,37 +397,30 @@ void renderPeriodoMenu() {
 }
 
 void renderDisplayMenu() {
-    const int display_min = 0;
-    const int display_max = NUM_LEDS - 1;
-    // O valor que há de ser registrado está na variável global _testDisplay
+    // Variável temporária para desenhar no LCD
+    u8 val;
 
-    // Buffers para saída de dados
-    char buffer_temp[7];                        // Buffer para conversões
-    char buffer_display_msg[LCD_COLLUMN_COUNT]; // Suficiente para toda a extensão do display
+    TargetLed += getEncoderInput();
 
-    TargetLed += EncoderInput;
+    if (TargetLed >= NUM_LEDS) TargetLed = 0;
+    if (TargetLed < 0) TargetLed = NUM_LEDS - 1;
 
-    if (TargetLed > display_max) TargetLed = display_min;
-    if (TargetLed < display_min) TargetLed = display_max;
+    // O compilador vai transformar isso automaticamente em: Lcd_Out(1, 1, "Display: 1 - 32");
+    Lcd_Out(1, 1, "Display: 1 - " STR(NUM_LEDS));
 
-    // Formatando o buffer: "Display: 1 - 32"
-    strcpy(buffer_display_msg, "Display: ");
-    IntToStr(display_min + 1, buffer_temp);
-    Ltrim(buffer_temp);
-    strcat(buffer_display_msg, buffer_temp);
-    strcat(buffer_display_msg, " - ");
-    IntToStr(display_max + 1, buffer_temp);
-    Ltrim(buffer_temp);
-    strcat(buffer_display_msg, buffer_temp);
-    // Enviando ao Lcd
-    Lcd_Out(1, 1, buffer_display_msg);
+    // A linha 2 é dinâmica e pode ter um ou 2 digítos
+    val = TargetLed + 1;
 
-    // Formatando o buffer: "N-o" & Enviando ao LCD
-    // Soma 1 para que o usuário veja de 1 - N e não 0 - N-1
-    IntToStr(TargetLed + 1, buffer_temp);
-    Lcd_Out(2, 1, buffer_temp);
-    Lcd_Out_Cp("-o");
-    Lcd_Out_Cp(" ");                        // Caso troque de um número com 2 dígitos para 1 digíto sobrescreve artefatos
+    if (val >= 10) {
+        // Tem dois dígitos (Ex: 15)
+        Lcd_Chr(2, 1, (val / 10) + '0'); // Extrai a dezena  (1)
+        Lcd_Chr(2, 2, (val % 10) + '0'); // Extrai a unidade (5)
+        Lcd_Out_Cp("-o ");               // O espaço no final limpa lixo antigo da tela
+    } else {
+        // Tem um dígito (Ex: 5)
+        Lcd_Chr(2, 1, val + '0');        // Extrai a unidade (5)
+        Lcd_Out_Cp("-o  ");              // Dois espaços extras para garantir a limpeza do LCD
+    }
 }
 
 void main() {
