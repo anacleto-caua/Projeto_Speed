@@ -56,7 +56,7 @@ sbit LCD_D7_Direction at TRISD3_bit;
 #define ENCODER_SIGNAL_PORT PORTB.B3
 
 // Porta do dmux do led
-#define LED_DMUX_PORT PORTC
+#define LED_DMUX_PORT LATC //PORTC
 
 // Possiveis estados do programa       // u8
 #define STATE_IDLE                  0  // Dispositivo iniciado mas sem nada a fazer
@@ -89,7 +89,7 @@ i16 TestPeriodo = 500;    // Quanto tempo de luz dar para cada led
 // Para o usuário será enumerado de 1 - 32 por simplicidade
 #define NUM_LEDS 32     // u8
 u8 CurrentLed = 0;      // Qual led está acesso
-i8 TargetLed  = 0;      // Qual led vai ser o principal do teste
+i8 TargetLed  = NUM_LEDS - 1;      // Qual led vai ser o principal do teste
 
 // Menu
 // --- Item Período ---
@@ -253,14 +253,16 @@ void interrupt() {
             TimeSinceTestStarted++;
 
             if(LedExposition >= TestPeriodo){
-                LED_DMUX_PORT++;    // Muda o LED
+                LED_DMUX_PORT = CurrentLed;    // Muda o LED
+                CurrentLed++;
                 LedExposition = 0;  // Reseta apenas o ritmo, mantendo o tempo total
 
                 if (LED_DMUX_PORT >= NUM_LEDS) {
                     LED_DMUX_PORT = 0;
+                    CurrentLed = 0;
                     // Teste terminou sem reação do usuário, calcula o tempo de reação assim mesmo
                     current_timer = TimeSinceTestStarted;
-                    ReactionTimeDifference = current_timer - TimeMeantForUserReaction;
+                    ReactionTimeDifference = (i32)current_timer - (i32)TimeMeantForUserReaction;
                     ProgramState = STATE_CALCULATE_TEST_RESULT;
                 }
             }
@@ -272,14 +274,16 @@ void interrupt() {
         INT0IF_bit = 0x00;
 
         switch (ProgramState) {
+        /*
             case STATE_TEST_READY:
                 ProgramState = STATE_TEST_BEGIN;
                 break;
+                */
             case STATE_RUNNING_TEST:
                 // Usuário reagiu ao teste
                 // Já calcula o tempo para que outra interrupção do timer0 não afete a contagem
                 current_timer = TimeSinceTestStarted;
-                ReactionTimeDifference = current_timer - TimeMeantForUserReaction;
+                ReactionTimeDifference = (i32)current_timer - (i32)TimeMeantForUserReaction;
                 ProgramState = STATE_CALCULATE_TEST_RESULT;
                 break;
         }
@@ -393,7 +397,7 @@ void renderPeriodoMenu() {
 
     Lcd_Out(1, 1, "Período: ");
     Lcd_Out(2, 1, periodo_buffer);
-    Lcd_Out_Cp(" ms ");
+    Lcd_Out_CP(" ms ");
 }
 
 void renderDisplayMenu() {
@@ -415,17 +419,17 @@ void renderDisplayMenu() {
         // Tem dois dígitos (Ex: 15)
         Lcd_Chr(2, 1, (val / 10) + '0'); // Extrai a dezena  (1)
         Lcd_Chr(2, 2, (val % 10) + '0'); // Extrai a unidade (5)
-        Lcd_Out_Cp("-o ");               // O espaço no final limpa lixo antigo da tela
+        Lcd_Out_CP("-o ");               // O espaço no final limpa lixo antigo da tela
     } else {
         // Tem um dígito (Ex: 5)
         Lcd_Chr(2, 1, val + '0');        // Extrai a unidade (5)
-        Lcd_Out_Cp("-o  ");              // Dois espaços extras para garantir a limpeza do LCD
+        Lcd_Out_CP("-o  ");              // Dois espaços extras para garantir a limpeza do LCD
     }
 }
 
 void main() {
     char lcd_line_buffer[LCD_COLLUMN_COUNT];    // Buffer para escrever na tela
-    char conversions_buffer[10];                // Buffer temporário para conversões
+    char conversions_buffer[15];                // Buffer temporário para conversões
 
     RCON.IPEN = 0;                              // Desabilita a prioridade de input, assim todas interrup��es rodam no interrupt() ignorando o interrupt_low() -- Conversar com professor --
 
@@ -522,6 +526,7 @@ void main() {
                 TimeSinceTestStarted = 0;
                 TimeMeantForUserReaction = TargetLed * TestPeriodo;
                 LED_DMUX_PORT = 0;
+                CurrentLed = 0;
                 // Reseta o contador novamente para que o primeiro ms seja contado por completo
                 ReloadTimer0();
 
@@ -529,6 +534,7 @@ void main() {
             break;
             case STATE_TEST_READY:
                 // ...
+                ProgramState = STATE_TEST_BEGIN;
             break;
             case STATE_TEST_BEGIN:
                 // Libera o interrupção Timer0
@@ -553,7 +559,7 @@ void main() {
                 strcpy(lcd_line_buffer, "Reação: ");
 
                 //reactionTimeDifference = 2909;
-                IntToStr(ReactionTimeDifference, conversions_buffer);
+                LongToStr(ReactionTimeDifference, conversions_buffer);
                 Ltrim(conversions_buffer);
 
                 strcat(lcd_line_buffer, conversions_buffer);
