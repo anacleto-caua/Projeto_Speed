@@ -525,7 +525,7 @@ fun ConsoleZone(state: AppState) {
             LazyColumn(reverseLayout = true) {
                 items(state.consoleLogs) { log ->
                     val color = when {
-                        log.contains("⚠️") -> Color(0xFFFF5555)
+                        log.contains("!!!") -> Color(0xFFFF5555)
                         log.contains("TX:") -> Color(0xFF55FFFF)
                         log.contains("RX:") -> Color(0xFF55FF55)
                         else -> Color.LightGray
