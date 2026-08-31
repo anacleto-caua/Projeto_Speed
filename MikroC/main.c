@@ -23,8 +23,6 @@ typedef struct {
 } StrView;
 
 #define MAKE_VIEW(str) { str, sizeof(str) - 1 }
-#define STR_HELPER(x) #x
-#define STR(x) STR_HELPER(x)
 
 // Mapeamento do LCD
 #define LCD_COLLUMN_COUNT 20
@@ -52,7 +50,18 @@ sbit LCD_D7_Direction at TRISD3_bit;
 #define ENCODER_SIGNAL_PORT PORTB.B3
 
 // Porta do dmux do led (Usa LATC para evitar problemas de Read-Modify-Write)
-#define LED_DMUX_PORT LATC 
+// Ocupa apenas os 5 bits menos significativos (RC0-RC4, índice 0 a 31);
+// os bits restantes de LATC (ex.: RC5, controle do Bluetooth) são preservados.
+#define LED_DMUX_PORT LATC
+#define LED_DMUX_MASK  0x1F
+#define SET_LED_DMUX(val) (LED_DMUX_PORT = (LED_DMUX_PORT & ~LED_DMUX_MASK) | ((val) & LED_DMUX_MASK))
+
+// Porta de controle de alimentação do módulo Bluetooth HC-05 (RC5), usada para
+// economizar bateria quando o Bluetooth não é necessário. #define para poder
+// remapear o pino facilmente no futuro.
+#define BLUETOOTH_CONTROL_PORT LATC.B5
+#define BLUETOOTH_ON_LEVEL  0  // Nível baixo = Bluetooth ligado
+#define BLUETOOTH_OFF_LEVEL 1  // Nível alto  = Bluetooth desligado
 
 // Possiveis estados do programa
 #define STATE_IDLE                  0
@@ -60,8 +69,8 @@ sbit LCD_D7_Direction at TRISD3_bit;
 #define STATE_SELECTING_MENU        2
 #define STATE_INIT_CONFIG_PERIODO   3
 #define STATE_CONFIG_PERIODO        4
-#define STATE_INIT_CONFIG_DISPLAY   5
-#define STATE_CONFIG_DISPLAY        6
+#define STATE_INIT_CONFIG_BLUETOOTH 5
+#define STATE_CONFIG_BLUETOOTH      6
 #define STATE_STARTING_TEST         7
 #define STATE_TEST_READY            8
 #define STATE_TEST_BEGIN            9
@@ -73,20 +82,30 @@ sbit LCD_D7_Direction at TRISD3_bit;
 volatile u8 ProgramState = STATE_IDLE;
 
 // Limites atualizados para bater com o Aplicativo Android/Desktop (0 a 5000)
-#define MIN_PERIODO 0      
-#define MAX_PERIODO 5000   
-#define PERIODO_STEP 50    
+#define MIN_PERIODO 0
+#define MAX_PERIODO 5000
+#define PERIODO_STEP 5
 
-i16 TestPeriodo = 500;    
+i16 TestPeriodo = 100;
 
-#define NUM_LEDS 32     
-u8 CurrentLed = 0;      
-i8 TargetLed  = NUM_LEDS - 1;      
+#define NUM_LEDS 32
+u8 CurrentLed = 0;
+
+// LED alvo fixo (numeração de 1 a NUM_LEDS)
+#define TARGET_LED_NUMBER 25
+#define TARGET_LED_INDEX  (TARGET_LED_NUMBER - 1)
 
 // Variáveis para comunicação Bluetooth não-bloqueante
 char bl_buffer[10];
 u8 bl_idx = 0;
 u8 bl_receiving = 0;
+
+// Liga/desliga o módulo Bluetooth para economizar bateria (ligado por padrão)
+u8 BluetoothEnabled = 1;
+
+void ApplyBluetoothState() {
+    BLUETOOTH_CONTROL_PORT = BluetoothEnabled ? BLUETOOTH_ON_LEVEL : BLUETOOTH_OFF_LEVEL;
+}
 
 // Menu OnClicks
 void PeriodoOnClick() {
@@ -97,10 +116,10 @@ void PeriodoOnClick() {
     }
 }
 
-void DisplayOnClick() {
+void BluetoothOnClick() {
     switch (ProgramState) {
-        case STATE_SELECTING_MENU: ProgramState = STATE_INIT_CONFIG_DISPLAY; break;
-        case STATE_CONFIG_DISPLAY: ProgramState = STATE_INIT_RENDER_MENU; break;
+        case STATE_SELECTING_MENU: ProgramState = STATE_INIT_CONFIG_BLUETOOTH; break;
+        case STATE_CONFIG_BLUETOOTH: ProgramState = STATE_INIT_RENDER_MENU; break;
         default: break;
     }
 }
@@ -114,9 +133,9 @@ typedef struct { StrView Name; OnClickFunc OnClick; } MenuOption;
 
 #define NUM_MENU_ITEMS 3
 const MenuOption MenuItems[NUM_MENU_ITEMS] = {
-    { MAKE_VIEW("Periodo"), PeriodoOnClick },
-    { MAKE_VIEW("Display"), DisplayOnClick },
-    { MAKE_VIEW("Iniciar"), IniciarOnClick }
+    { MAKE_VIEW("Periodo"),   PeriodoOnClick },
+    { MAKE_VIEW("Bluetooth"), BluetoothOnClick },
+    { MAKE_VIEW("Iniciar"),   IniciarOnClick }
 };
 
 i8 SelectedMenuOption = 0;
@@ -161,25 +180,46 @@ void bl_send_reaction_time(i32 reaction_time) {
     UART1_Write('>');
 }
 
+// Um teste em andamento já calculou TimeMeantForUserReaction a partir do
+// TestPeriodo vigente; aceitar um novo valor nesse meio tempo desincroniza o
+// cálculo do tempo de reação da velocidade real do chaser (ver KNOWN_ISSUES).
+u8 IsTestInProgress() {
+    switch (ProgramState) {
+        case STATE_STARTING_TEST:
+        case STATE_TEST_READY:
+        case STATE_TEST_BEGIN:
+        case STATE_RUNNING_TEST:
+        case STATE_CALCULATE_TEST_RESULT:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
 // Polling não bloqueante, verifica pacotes no buffer UART
 void check_bluetooth() {
     while (UART1_Data_Ready()) {
         char byte = UART1_Read();
-        
+
         if (byte == '<') {
             bl_receiving = 1;
             bl_idx = 0;
         } else if (byte == '>') {
             bl_receiving = 0;
             bl_buffer[bl_idx] = '\0';
-            
-            // Converte o pacote string ASCII recebido pelo app em numérico
-            TestPeriodo = atoi(bl_buffer);
-            
-            // Aplica os Clampings
-            if (TestPeriodo < MIN_PERIODO) TestPeriodo = MIN_PERIODO;
-            if (TestPeriodo > MAX_PERIODO) TestPeriodo = MAX_PERIODO;
-            
+
+            // Ignora o novo período durante um teste em andamento (ver
+            // IsTestInProgress) para não desincronizar o resultado; o pacote
+            // ainda é consumido normalmente para não travar o parser.
+            if (!IsTestInProgress()) {
+                // Converte o pacote string ASCII recebido pelo app em numérico
+                TestPeriodo = atoi(bl_buffer);
+
+                // Aplica os Clampings
+                if (TestPeriodo < MIN_PERIODO) TestPeriodo = MIN_PERIODO;
+                if (TestPeriodo > MAX_PERIODO) TestPeriodo = MAX_PERIODO;
+            }
+
         } else if (bl_receiving && bl_idx < 9) {
             bl_buffer[bl_idx++] = byte;
         }
@@ -200,12 +240,12 @@ void interrupt() {
             TimeSinceTestStarted++;
 
             if(LedExposition >= TestPeriodo){
-                LED_DMUX_PORT = CurrentLed;
+                SET_LED_DMUX(CurrentLed);
                 CurrentLed++;
-                LedExposition = 0; 
+                LedExposition = 0;
 
-                if (CurrentLed >= NUM_LEDS) { 
-                    LED_DMUX_PORT = 0;
+                if (CurrentLed >= NUM_LEDS) {
+                    SET_LED_DMUX(0);
                     CurrentLed = 0;
                     current_timer = TimeSinceTestStarted;
                     ReactionTimeDifference = (i32)current_timer - (i32)TimeMeantForUserReaction;
@@ -242,7 +282,7 @@ void interrupt() {
                 ProgramState = STATE_INIT_RENDER_MENU;
             break;
             case STATE_SELECTING_MENU:
-            case STATE_CONFIG_DISPLAY:
+            case STATE_CONFIG_BLUETOOTH:
             case STATE_CONFIG_PERIODO:
                 MenuItems[SelectedMenuOption].OnClick();
             break;
@@ -306,24 +346,15 @@ void renderPeriodoMenu() {
     Lcd_Out_CP(" ms ");
 }
 
-void renderDisplayMenu() {
-    u8 val;
-    TargetLed += getEncoderInput();
-
-    if (TargetLed >= NUM_LEDS) TargetLed = 0;
-    if (TargetLed < 0) TargetLed = NUM_LEDS - 1;
-
-    Lcd_Out(1, 1, "Display: 1 - " STR(NUM_LEDS));
-    val = TargetLed + 1;
-
-    if (val >= 10) {
-        Lcd_Chr(2, 1, (val / 10) + '0'); 
-        Lcd_Chr(2, 2, (val % 10) + '0'); 
-        Lcd_Out_CP("-o ");               
-    } else {
-        Lcd_Chr(2, 1, val + '0');        
-        Lcd_Out_CP("-o  ");              
+void renderBluetoothMenu() {
+    if (getEncoderInput() != 0) {
+        BluetoothEnabled = !BluetoothEnabled;
+        ApplyBluetoothState();
     }
+
+    Lcd_Out(1, 1, "Bluetooth:");
+    if (BluetoothEnabled) Lcd_Out(2, 1, "Ligado    ");
+    else Lcd_Out(2, 1, "Desligado ");
 }
 
 void main() {
@@ -368,6 +399,8 @@ void main() {
     UART1_Init(9600);
     Delay_ms(100);
 
+    ApplyBluetoothState();
+
     while(1) {
         // Escuta constantemente atualizações Bluetooth do Android/Desktop
         check_bluetooth();
@@ -390,12 +423,12 @@ void main() {
             case STATE_CONFIG_PERIODO:
                 renderPeriodoMenu();
             break;
-            case STATE_INIT_CONFIG_DISPLAY:
+            case STATE_INIT_CONFIG_BLUETOOTH:
                 Lcd_Cmd(_LCD_CLEAR);
-                ProgramState = STATE_CONFIG_DISPLAY;
+                ProgramState = STATE_CONFIG_BLUETOOTH;
             break;
-            case STATE_CONFIG_DISPLAY:
-                renderDisplayMenu();
+            case STATE_CONFIG_BLUETOOTH:
+                renderBluetoothMenu();
             break;
             case STATE_STARTING_TEST:
                 TMR0IE_bit = 0;
@@ -407,8 +440,8 @@ void main() {
 
                 LedExposition = 0;
                 TimeSinceTestStarted = 0;
-                TimeMeantForUserReaction = TargetLed * TestPeriodo;
-                LED_DMUX_PORT = 0;
+                TimeMeantForUserReaction = TARGET_LED_INDEX * TestPeriodo;
+                SET_LED_DMUX(0);
                 CurrentLed = 0;
                 
                 ReloadTimer0();
