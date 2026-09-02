@@ -4,4 +4,6 @@
 # Se você usa um sistema linux execute:
 # --- sudo apt-get install python3-tk
 
-pyserial>=3.5
+# Nenhuma dependência externa é necessária além do tkinter: a conexão
+# Bluetooth usa socket.AF_BLUETOOTH (RFCOMM), nativo da biblioteca padrão
+# do Python no Linux e no Windows.
