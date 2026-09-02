@@ -12,6 +12,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -46,15 +47,19 @@ import java.util.*
 // CONFIGURATION
 private val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
 
+// Backoff schedule (ms) between reconnect attempts; holds at the last value
+// once exhausted instead of growing forever.
+private val RECONNECT_DELAYS_MS = longArrayOf(1000L, 2000L, 4000L, 8000L, 15000L)
+
 // STATE
-enum class ConnectionState { DISCONNECTED, CONNECTING, CONNECTED }
+enum class ConnectionState { DISCONNECTED, CONNECTING, CONNECTED, RECONNECTING }
 
 data class AppState(
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
     val selectedDevice: BluetoothDevice? = null,
     val connectedDeviceName: String? = null,
     val participantName: String = "",
-    val intervalValue: Float = 0f, // Range: 0 to 5000
+    val intervalValue: Float = 100f, // Range: 0 to 5000, matches firmware's default TestPeriodo
     val activeLogFileUri: Uri? = null,
     val activeLogFileName: String? = null,
     val consoleLogs: List<String> = emptyList()
@@ -70,7 +75,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var btSocket: android.bluetooth.BluetoothSocket? = null
     private var outStream: OutputStream? = null
     private var inStream: InputStream? = null
-    private var listeningJob: Job? = null
+    private var connectionJob: Job? = null
+
+    // Bumped on every connect/disconnect click; lets a stale reconnect loop
+    // recognize it's obsolete and stop touching shared state. Closing the
+    // socket from disconnect() is what actually unblocks a pending
+    // connect()/read() call — cancelling the Job alone can't interrupt those,
+    // since they're blocking Java I/O, not suspending calls.
+    @Volatile private var generation = 0
+    @Volatile private var wantConnection = false
 
     private val contentResolver = application.contentResolver
 
@@ -134,60 +147,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // Bluetooth
     fun toggleConnection() {
         val currentState = _state.value
-        if (currentState.connectionState == ConnectionState.CONNECTED || currentState.connectionState == ConnectionState.CONNECTING) {
+        if (currentState.connectionState == ConnectionState.DISCONNECTED) {
+            currentState.selectedDevice?.let { connect(it) }
+        } else {
             disconnect()
-        } else if (currentState.selectedDevice != null) {
-            connectToDevice(currentState.selectedDevice)
         }
     }
 
-    private fun connectToDevice(device: BluetoothDevice) {
+    private fun connect(device: BluetoothDevice) {
+        generation++
+        val myGen = generation
+        wantConnection = true
         _state.update { it.copy(connectionState = ConnectionState.CONNECTING) }
-        logToConsole("Attempting to connect to ${device.name} (Timeout: 5s)...")
-
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                btSocket = device.createRfcommSocketToServiceRecord(SPP_UUID)
-
-                // Parallel kill switch to unblock the native OS socket leak
-                val timeoutJob = launch {
-                    delay(5000L)
-                    btSocket?.close()
-                }
-
-                btSocket?.connect()
-                timeoutJob.cancel() // Cancel kill switch if connection succeeds
-
-                outStream = btSocket?.outputStream
-                inStream = btSocket?.inputStream
-
-                withContext(Dispatchers.Main) {
-                    _state.update {
-                        it.copy(
-                            connectionState = ConnectionState.CONNECTED,
-                            connectedDeviceName = device.name
-                        )
-                    }
-                    logToConsole("Connected successfully.")
-                    startListening()
-                }
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    disconnect()
-                    logToConsole("Connection failed or timed out.")
-                }
-            }
+        connectionJob = viewModelScope.launch(Dispatchers.IO) {
+            runConnectionLoop(myGen, device)
         }
     }
 
     fun disconnect() {
-        listeningJob?.cancel()
+        generation++
+        wantConnection = false
         try {
             btSocket?.close()
         } catch (e: Exception) { /* Ignore */ }
         btSocket = null
         outStream = null
         inStream = null
+        connectionJob?.cancel()
         _state.update {
             it.copy(
                 connectionState = ConnectionState.DISCONNECTED,
@@ -197,96 +183,206 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         logToConsole("Disconnected.")
     }
 
+    // Exactly one coroutine owns the live socket at a time: it connects,
+    // syncs the interval, listens, and on any drop retries with backoff until
+    // either it reconnects or the user cancels (wantConnection goes false /
+    // generation changes via disconnect()). This mirrors DesktopSpeed's
+    // worker-thread design so a dropped Bluetooth Classic link recovers on
+    // its own instead of silently going deaf until a manual reconnect.
+    private suspend fun CoroutineScope.runConnectionLoop(myGen: Int, device: BluetoothDevice) {
+        var backoffIdx = 0
+        while (wantConnection && myGen == generation) {
+            val attemptState = if (backoffIdx == 0) ConnectionState.CONNECTING else ConnectionState.RECONNECTING
+            setConnectionState(attemptState, myGen)
+            if (backoffIdx == 0) {
+                log("Attempting to connect to ${device.name} (Timeout: 5s)...", myGen)
+            } else {
+                log("Reconnecting to ${device.name} (attempt ${backoffIdx + 1})...", myGen)
+            }
+
+            var socket: android.bluetooth.BluetoothSocket? = null
+            try {
+                socket = device.createRfcommSocketToServiceRecord(SPP_UUID)
+
+                // Parallel kill switch to unblock the native OS socket leak
+                val timeoutJob = launch {
+                    delay(5000L)
+                    try { socket.close() } catch (e: Exception) { /* Ignore */ }
+                }
+
+                socket.connect()
+                timeoutJob.cancel() // Cancel kill switch if connection succeeds
+            } catch (e: Exception) {
+                try { socket?.close() } catch (ex: Exception) { /* Ignore */ }
+                if (!wantConnection || myGen != generation) return
+                val delayMs = RECONNECT_DELAYS_MS[minOf(backoffIdx, RECONNECT_DELAYS_MS.lastIndex)]
+                backoffIdx++
+                log("Connect failed (${e.message}); retrying in ${delayMs / 1000}s...", myGen)
+                delay(delayMs)
+                continue
+            }
+
+            if (myGen != generation || !wantConnection) {
+                try { socket.close() } catch (e: Exception) { /* Ignore */ }
+                return
+            }
+
+            btSocket = socket
+            outStream = socket.outputStream
+            inStream = socket.inputStream
+            backoffIdx = 0
+            setConnectionState(ConnectionState.CONNECTED, myGen, device.name)
+            log("Connected to ${device.name}.", myGen)
+
+            // Force a sync: the firmware's real TestPeriodo may not match
+            // what's on screen (changed via the LCD menu, or a previous send
+            // was ignored/lost), so every fresh connection re-asserts the
+            // app's current interval rather than assuming it already matches.
+            val syncValue = _state.value.intervalValue.toInt()
+            log("Forcing interval sync ($syncValue ms) with firmware...", myGen)
+            sendPayload("<$syncValue>", myGen)
+
+            listenUntilDropped(myGen)
+
+            try { socket.close() } catch (e: Exception) { /* Ignore */ }
+            if (btSocket === socket) {
+                btSocket = null
+                outStream = null
+                inStream = null
+            }
+
+            if (myGen != generation) return // a newer connect/disconnect click already owns the state
+
+            if (!wantConnection) {
+                setConnectionState(ConnectionState.DISCONNECTED, myGen)
+                return
+            }
+
+            val delayMs = RECONNECT_DELAYS_MS[minOf(backoffIdx, RECONNECT_DELAYS_MS.lastIndex)]
+            backoffIdx++
+            log("Connection lost; retrying in ${delayMs / 1000}s...", myGen)
+            delay(delayMs)
+        }
+
+        setConnectionState(ConnectionState.DISCONNECTED, myGen)
+    }
+
+    private suspend fun listenUntilDropped(myGen: Int) {
+        val buffer = ByteArray(1024)
+        val stringBuilder = StringBuilder()
+
+        try {
+            while (wantConnection && myGen == generation) {
+                val bytesRead = inStream?.read(buffer) ?: -1
+                if (bytesRead == -1) break
+
+                stringBuilder.append(String(buffer, 0, bytesRead))
+
+                // Memory leak protection
+                if (stringBuilder.length > 4096) {
+                    stringBuilder.clear()
+                    log("RX Warning: Buffer overflow cleared due to corrupted stream.", myGen)
+                    continue
+                }
+
+                while (true) {
+                    val startIdx = stringBuilder.indexOf("<")
+                    if (startIdx == -1) break
+
+                    if (startIdx > 0) {
+                        stringBuilder.delete(0, startIdx)
+                    }
+
+                    val endIdx = stringBuilder.indexOf(">")
+                    if (endIdx == -1) break
+
+                    val payload = stringBuilder.substring(1, endIdx)
+                    processIncomingPayload(payload, myGen)
+
+                    stringBuilder.delete(0, endIdx + 1)
+                }
+            }
+        } catch (e: Exception) {
+            // Socket closed or errored; the caller decides whether to
+            // reconnect (wantConnection/generation still valid) or stop.
+        }
+    }
+
     fun sendIntervalCommand() {
         if (_state.value.connectionState != ConnectionState.CONNECTED) return
         val commandValue = _state.value.intervalValue.toInt()
-        val payload = "<$commandValue>"
-
+        val myGen = generation
         viewModelScope.launch(Dispatchers.IO) {
-            try {
-                outStream?.write(payload.toByteArray())
-                outStream?.flush()
-                withContext(Dispatchers.Main) {
-                    logToConsole("TX: $payload")
-                }
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    logToConsole("TX Error: ${e.message}")
-                    disconnect()
-                }
-            }
+            sendPayload("<$commandValue>", myGen)
         }
     }
 
-    private fun startListening() {
-        listeningJob = viewModelScope.launch(Dispatchers.IO) {
-            val buffer = ByteArray(1024)
-            val stringBuilder = StringBuilder()
-
-            try {
-                while (true) {
-                    val bytesRead = inStream?.read(buffer) ?: break
-                    if (bytesRead == -1) break
-
-                    stringBuilder.append(String(buffer, 0, bytesRead))
-
-                    // Memory leak protection
-                    if (stringBuilder.length > 4096) {
-                        stringBuilder.clear()
-                        withContext(Dispatchers.Main) {
-                            logToConsole("RX Warning: Buffer overflow cleared due to corrupted stream.")
-                        }
-                        continue
-                    }
-
-                    while (true) {
-                        val startIdx = stringBuilder.indexOf("<")
-                        if (startIdx == -1) break
-
-                        if (startIdx > 0) {
-                            stringBuilder.delete(0, startIdx)
-                        }
-
-                        val endIdx = stringBuilder.indexOf(">")
-                        if (endIdx == -1) break
-
-                        val payload = stringBuilder.substring(1, endIdx)
-                        processIncomingPayload(payload)
-
-                        stringBuilder.delete(0, endIdx + 1)
-                    }
-                    delay(10)
-                }
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    logToConsole("RX Error: Device disconnected.")
-                    disconnect()
-                }
-            }
+    private suspend fun sendPayload(payload: String, myGen: Int) {
+        try {
+            val stream = outStream ?: throw java.io.IOException("Not connected")
+            stream.write(payload.toByteArray())
+            stream.flush()
+            log("Sending interval: $payload...", myGen)
+        } catch (e: Exception) {
+            log("TX Error: ${e.message}", myGen)
+            // Don't touch wantConnection/generation here — just force the
+            // socket closed so listenUntilDropped's read fails and the
+            // connection loop takes its normal reconnect path, instead of
+            // hard-disconnecting on a single send error.
+            try { btSocket?.close() } catch (ex: Exception) { /* Ignore */ }
         }
     }
 
-    private suspend fun processIncomingPayload(payload: String) {
+    private suspend fun processIncomingPayload(payload: String, myGen: Int) {
+        // Period-set acknowledgment from the firmware (see PROTOCOL.md):
+        // 'A' = applied, 'B' = ignored because a test is running. Not a
+        // reaction-time result, so it's handled and consumed separately.
+        if (payload == "A" || payload == "B") {
+            val message = if (payload == "A")
+                "Interval update applied by firmware."
+            else
+                "Interval update ignored — a test is currently running on the firmware."
+            log(message, myGen)
+            return
+        }
+
         val currentState = _state.value
         val isNumeric = payload.matches("-?\\d+(\\.\\d+)?".toRegex())
         val status = if (isNumeric) "OK" else "BAD_DATA"
 
-        val logEntry = "RX: <$payload> [$status]"
-
-        withContext(Dispatchers.Main) {
-            logToConsole(logEntry)
-        }
+        log("RX: <$payload> [$status]", myGen)
 
         if (currentState.activeLogFileUri == null) {
-            withContext(Dispatchers.Main) {
-                logToConsole("NOT SAVED: No file active.")
-            }
+            log("NOT SAVED: No file active.", myGen)
             return
         }
 
         val timestamp = getTimestamp(includeMillis = true)
         val csvRow = "$timestamp,${currentState.participantName},$status,$payload\n"
         writeToCsv(csvRow)
+    }
+
+    private suspend fun log(message: String, myGen: Int? = null) {
+        if (myGen != null && myGen != generation) return
+        withContext(Dispatchers.Main) {
+            logToConsole(message)
+        }
+    }
+
+    private suspend fun setConnectionState(newState: ConnectionState, myGen: Int, connectedDeviceName: String? = null) {
+        if (myGen != generation) return
+        withContext(Dispatchers.Main) {
+            _state.update {
+                it.copy(
+                    connectionState = newState,
+                    connectedDeviceName = when (newState) {
+                        ConnectionState.CONNECTED -> connectedDeviceName
+                        ConnectionState.DISCONNECTED -> null
+                        else -> it.connectedDeviceName
+                    }
+                )
+            }
+        }
     }
 
     private fun getTimestamp(includeMillis: Boolean = false): String {
@@ -440,13 +536,18 @@ fun ConnectionZone(
                 onClick = { viewModel.toggleConnection() },
                 enabled = state.selectedDevice != null && hasPermissions,
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = if (state.connectionState == ConnectionState.CONNECTED) Color.Red else MaterialTheme.colorScheme.primary
+                    containerColor = when (state.connectionState) {
+                        ConnectionState.CONNECTED -> Color.Red
+                        ConnectionState.RECONNECTING -> Color(0xFFB8860B)
+                        else -> MaterialTheme.colorScheme.primary
+                    }
                 )
             ) {
                 Text(
                     when (state.connectionState) {
                         ConnectionState.DISCONNECTED -> "Connect"
                         ConnectionState.CONNECTING -> "Connecting..."
+                        ConnectionState.RECONNECTING -> "Reconnecting..."
                         ConnectionState.CONNECTED -> "Disconnect"
                     }
                 )
