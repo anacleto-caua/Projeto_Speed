@@ -180,6 +180,16 @@ void bl_send_reaction_time(i32 reaction_time) {
     UART1_Write('>');
 }
 
+// Confirma para o app se o novo período foi aplicado ('A') ou ignorado porque
+// um teste está em andamento ('B'). Um único caractere evita qualquer
+// ambiguidade com o payload numérico de bl_send_reaction_time(); ver
+// Docs/dev/PROTOCOL.md.
+void bl_send_period_ack(u8 applied) {
+    UART1_Write('<');
+    UART1_Write(applied ? 'A' : 'B');
+    UART1_Write('>');
+}
+
 // Um teste em andamento já calculou TimeMeantForUserReaction a partir do
 // TestPeriodo vigente; aceitar um novo valor nesse meio tempo desincroniza o
 // cálculo do tempo de reação da velocidade real do chaser (ver KNOWN_ISSUES).
@@ -218,6 +228,10 @@ void check_bluetooth() {
                 // Aplica os Clampings
                 if (TestPeriodo < MIN_PERIODO) TestPeriodo = MIN_PERIODO;
                 if (TestPeriodo > MAX_PERIODO) TestPeriodo = MAX_PERIODO;
+
+                bl_send_period_ack(1);
+            } else {
+                bl_send_period_ack(0);
             }
 
         } else if (bl_receiving && bl_idx < 9) {
