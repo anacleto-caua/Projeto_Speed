@@ -21,13 +21,16 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
@@ -47,9 +50,19 @@ import java.util.*
 // CONFIGURATION
 private val SPP_UUID: UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
 
+// Same default MAC DesktopSpeed's connection field ships with, so a fresh
+// install of either app points at the same board out of the box.
+private const val DEFAULT_MAC_ADDRESS = "98:D3:51:FD:CB:35"
+
 // Backoff schedule (ms) between reconnect attempts; holds at the last value
 // once exhausted instead of growing forever.
 private val RECONNECT_DELAYS_MS = longArrayOf(1000L, 2000L, 4000L, 8000L, 15000L)
+
+// Matches the firmware's own MIN_PERIODO/MAX_PERIODO clamp. The slider
+// itself still spans 0..5000 for backward compatibility, but the typed
+// entry field clamps to what the firmware will actually accept.
+private const val MIN_INTERVAL_MS = 1
+private const val MAX_INTERVAL_MS = 5000
 
 // STATE
 enum class ConnectionState { DISCONNECTED, CONNECTING, CONNECTED, RECONNECTING }
@@ -58,6 +71,10 @@ data class AppState(
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
     val selectedDevice: BluetoothDevice? = null,
     val connectedDeviceName: String? = null,
+    // Failsafe for when the HC-05 isn't paired at the OS level yet (so it
+    // doesn't show up in bondedDevices at all) — mirrors DesktopSpeed's plain
+    // MAC-address field, which never depends on OS-level pairing state.
+    val macAddress: String = DEFAULT_MAC_ADDRESS,
     val participantName: String = "",
     val intervalValue: Float = 100f, // Range: 0 to 5000, matches firmware's default TestPeriodo
     val activeLogFileUri: Uri? = null,
@@ -100,6 +117,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // State updates
     fun selectDevice(device: BluetoothDevice) = _state.update { it.copy(selectedDevice = device) }
+    fun updateMacAddress(mac: String) = _state.update { it.copy(macAddress = mac) }
+
+    // Failsafe path for a device that isn't (yet) in bondedDevices — see
+    // macAddress's doc comment on AppState. getRemoteDevice() works for any
+    // syntactically valid MAC, bonded or not; Android resolves/pairs it as
+    // needed during the actual socket connect() in runConnectionLoop().
+    @SuppressLint("MissingPermission")
+    fun selectDeviceByMac(mac: String, btAdapter: BluetoothAdapter?) {
+        val trimmed = mac.trim().uppercase()
+        if (!BluetoothAdapter.checkBluetoothAddress(trimmed)) {
+            logToConsole("Invalid MAC address: \"$trimmed\" (expected format AA:BB:CC:DD:EE:FF).")
+            return
+        }
+        val device = try {
+            btAdapter?.getRemoteDevice(trimmed)
+        } catch (e: IllegalArgumentException) {
+            null
+        }
+        if (device == null) {
+            logToConsole("Could not resolve device for MAC \"$trimmed\".")
+            return
+        }
+        selectDevice(device)
+        logToConsole("Selected $trimmed via manual MAC entry.")
+    }
+
     fun updateParticipantName(name: String) = _state.update { it.copy(participantName = name) }
     fun updateIntervalValue(value: Float) = _state.update { it.copy(intervalValue = value) }
     fun logToConsole(message: String) {
@@ -190,14 +233,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // worker-thread design so a dropped Bluetooth Classic link recovers on
     // its own instead of silently going deaf until a manual reconnect.
     private suspend fun CoroutineScope.runConnectionLoop(myGen: Int, device: BluetoothDevice) {
+        // A device resolved via getRemoteDevice() (manual MAC entry, not yet
+        // bonded) usually has a null name until it's actually connected —
+        // fall back to the MAC so logs never print the literal string "null".
+        val deviceLabel = device.name ?: device.address
         var backoffIdx = 0
         while (wantConnection && myGen == generation) {
             val attemptState = if (backoffIdx == 0) ConnectionState.CONNECTING else ConnectionState.RECONNECTING
             setConnectionState(attemptState, myGen)
             if (backoffIdx == 0) {
-                log("Attempting to connect to ${device.name} (Timeout: 5s)...", myGen)
+                log("Attempting to connect to $deviceLabel (Timeout: 5s)...", myGen)
             } else {
-                log("Reconnecting to ${device.name} (attempt ${backoffIdx + 1})...", myGen)
+                log("Reconnecting to $deviceLabel (attempt ${backoffIdx + 1})...", myGen)
             }
 
             var socket: android.bluetooth.BluetoothSocket? = null
@@ -231,8 +278,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             outStream = socket.outputStream
             inStream = socket.inputStream
             backoffIdx = 0
-            setConnectionState(ConnectionState.CONNECTED, myGen, device.name)
-            log("Connected to ${device.name}.", myGen)
+            setConnectionState(ConnectionState.CONNECTED, myGen, device.name ?: deviceLabel)
+            log("Connected to $deviceLabel.", myGen)
 
             // Force a sync: the firmware's real TestPeriodo may not match
             // what's on screen (changed via the LCD menu, or a previous send
@@ -334,9 +381,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun processIncomingPayload(payload: String, myGen: Int) {
-        // Period-set acknowledgment from the firmware (see PROTOCOL.md):
-        // 'A' = applied, 'B' = ignored because a test is running. Not a
-        // reaction-time result, so it's handled and consumed separately.
+        // Period-set acknowledgment from the firmware: 'A' = applied,
+        // 'B' = ignored because a test is running. Not a reaction-time
+        // result, so it's handled and consumed separately.
         if (payload == "A" || payload == "B") {
             val message = if (payload == "A")
                 "Interval update applied by firmware."
@@ -348,7 +395,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         val currentState = _state.value
         val isNumeric = payload.matches("-?\\d+(\\.\\d+)?".toRegex())
-        val status = if (isNumeric) "OK" else "BAD_DATA"
+
+        // Classify against the app's tracked copy of the firmware's
+        // TestPeriodo: [0, TestPeriodo) means the press landed while the
+        // target LED was actually lit.
+        val status = when {
+            !isNumeric -> "BAD_DATA"
+            payload.toDouble() < 0 -> "EARLY"
+            payload.toDouble() < currentState.intervalValue.toDouble() -> "ON_TARGET"
+            else -> "LATE"
+        }
 
         log("RX: <$payload> [$status]", myGen)
 
@@ -503,10 +559,13 @@ fun ConnectionZone(
     hasPermissions: Boolean
 ) {
     var expanded by remember { mutableStateOf(false) }
+    val disconnected = state.connectionState == ConnectionState.DISCONNECTED
 
-    val pairedDevices = remember(hasPermissions) {
-        if (hasPermissions) btAdapter?.bondedDevices?.toList() ?: emptyList() else emptyList()
-    }
+    // Recomputed on every recomposition (cheap local call, no IPC) rather than
+    // cached, so a device paired in system Bluetooth settings while this
+    // screen is open shows up next time the dropdown opens without needing
+    // hasPermissions to change first.
+    val pairedDevices = if (hasPermissions) btAdapter?.bondedDevices?.toList() ?: emptyList() else emptyList()
 
     Column {
         Text("Device Connection", style = MaterialTheme.typography.titleMedium)
@@ -514,12 +573,19 @@ fun ConnectionZone(
             Box(modifier = Modifier.weight(1f)) {
                 Button(
                     onClick = { expanded = true },
-                    enabled = state.connectionState == ConnectionState.DISCONNECTED && hasPermissions,
+                    enabled = disconnected && hasPermissions,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text(state.selectedDevice?.name ?: "Select Device")
+                    Text(state.selectedDevice?.let { it.name ?: it.address } ?: "Select Device")
                 }
                 DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                    if (pairedDevices.isEmpty()) {
+                        DropdownMenuItem(
+                            text = { Text("No paired devices — pair the HC-05 in system Bluetooth settings, or enter its MAC below") },
+                            onClick = { expanded = false },
+                            enabled = false
+                        )
+                    }
                     pairedDevices.forEach { device ->
                         DropdownMenuItem(
                             text = { Text(device.name) },
@@ -551,6 +617,27 @@ fun ConnectionZone(
                         ConnectionState.CONNECTED -> "Disconnect"
                     }
                 )
+            }
+        }
+
+        // Failsafe for when the HC-05 isn't paired at the OS level (so it
+        // never appears above at all) — same MAC-address model DesktopSpeed
+        // uses, which never depends on OS-level pairing state.
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+            OutlinedTextField(
+                value = state.macAddress,
+                onValueChange = { viewModel.updateMacAddress(it) },
+                label = { Text("Or enter MAC directly") },
+                enabled = disconnected && hasPermissions,
+                singleLine = true,
+                modifier = Modifier.weight(1f)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Button(
+                onClick = { viewModel.selectDeviceByMac(state.macAddress, btAdapter) },
+                enabled = disconnected && hasPermissions
+            ) {
+                Text("Use MAC")
             }
         }
     }
@@ -594,20 +681,61 @@ fun SessionZone(state: AppState, viewModel: MainViewModel) {
 
 @Composable
 fun ControlZone(state: AppState, viewModel: MainViewModel) {
+    val connected = state.connectionState == ConnectionState.CONNECTED
+
+    // Local text buffer, separate from state.intervalValue, so an in-progress
+    // keystroke (e.g. a momentarily-empty field while retyping) never gets
+    // clobbered by recomposition. Synced from external changes (dragging the
+    // slider, sync-on-connect) only while the field isn't focused; committed
+    // back up (clamped to MIN_INTERVAL_MS..MAX_INTERVAL_MS) on every valid
+    // keystroke and once more when focus leaves the field.
+    var intervalText by remember { mutableStateOf(state.intervalValue.toInt().toString()) }
+    var isEditingInterval by remember { mutableStateOf(false) }
+
+    LaunchedEffect(state.intervalValue) {
+        if (!isEditingInterval) {
+            intervalText = state.intervalValue.toInt().toString()
+        }
+    }
+
     Column {
         Row(verticalAlignment = Alignment.Bottom) {
             Text("Interval Control", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-            Text("${state.intervalValue.toInt()} ms", style = MaterialTheme.typography.titleLarge)
+            OutlinedTextField(
+                value = intervalText,
+                onValueChange = { newText ->
+                    intervalText = newText
+                    newText.toIntOrNull()?.let { parsed ->
+                        viewModel.updateIntervalValue(parsed.coerceIn(MIN_INTERVAL_MS, MAX_INTERVAL_MS).toFloat())
+                    }
+                },
+                modifier = Modifier
+                    .width(90.dp)
+                    .onFocusChanged { focusState ->
+                        isEditingInterval = focusState.isFocused
+                        if (!focusState.isFocused) {
+                            val parsed = intervalText.toIntOrNull()
+                                ?.coerceIn(MIN_INTERVAL_MS, MAX_INTERVAL_MS)
+                                ?: state.intervalValue.toInt()
+                            intervalText = parsed.toString()
+                            viewModel.updateIntervalValue(parsed.toFloat())
+                        }
+                    },
+                enabled = connected,
+                singleLine = true,
+                suffix = { Text("ms") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+            )
         }
         Slider(
             value = state.intervalValue,
             onValueChange = { viewModel.updateIntervalValue(it) },
             valueRange = 0f..5000f,
-            enabled = state.connectionState == ConnectionState.CONNECTED
+            enabled = connected
         )
         Button(
             onClick = { viewModel.sendIntervalCommand() },
-            enabled = state.connectionState == ConnectionState.CONNECTED,
+            enabled = connected,
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("Send Command")

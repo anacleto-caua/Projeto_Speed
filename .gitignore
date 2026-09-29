@@ -1,0 +1,3 @@
+# Build artifacts from DesktopSpeed/build.sh, build.bat, and
+# AndroidSpeed's build_apk.sh — see Docs/dev/APPLICATIONS.md "Distribution".
+/out/

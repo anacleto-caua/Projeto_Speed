@@ -7,3 +7,10 @@
 # Nenhuma dependência externa é necessária além do tkinter: a conexão
 # Bluetooth usa socket.AF_BLUETOOTH (RFCOMM), nativo da biblioteca padrão
 # do Python no Linux e no Windows.
+
+# Para gerar um executável único (não precisa de Python instalado na
+# máquina de destino), rode build.sh (Linux/macOS) ou build.bat (Windows) —
+# eles cuidam de instalar o PyInstaller sozinhos, num venv isolado
+# (.buildenv/). O resultado fica em dist/DesktopSpeed (ou DesktopSpeed.exe).
+# PyInstaller não faz cross-compile: rode o script no mesmo SO do
+# executável que você quer gerar.

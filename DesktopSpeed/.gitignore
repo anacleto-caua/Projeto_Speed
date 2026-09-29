@@ -1,1 +1,6 @@
 *.csv
+
+# PyInstaller build output/scratch (see build.sh / build.bat)
+.buildenv/
+build/
+dist/

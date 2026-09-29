@@ -6,6 +6,16 @@ Base de tempo de 1 ms -> Contador do timer0 (16 bits -  0 a 65536) inicia em    
      TMR0L = 0x78; (0X89 empiricamente)
 ***********************************************************/
 
+// Teste de calibração do Timer0: alterna RB5 a cada tick do Timer0, gerando
+// uma onda quadrada de referência para medir com osciloscópio/analisador
+// lógico o período real do Timer0 contra o nominal de 1 ms e ajustar
+// TIMER0_LOAD_HIGH/TIMER0_LOAD_LOW. RB5 não é usado por mais nada no
+// firmware, então é seguro reaproveitá-lo aqui.
+// Comente/descomente a linha abaixo para tirar/pôr o teste na compilação sem
+// apagar o código. Desligado por padrão após a calibração de
+// TIMER0_LOAD_LOW=0x9D (2026-09-17).
+// #define TIMER0_CALIBRATION_TEST
+
 // Definição de tipo
 typedef unsigned char u8;
 typedef signed char   i8;
@@ -43,8 +53,10 @@ sbit LCD_D6_Direction at TRISD2_bit;
 sbit LCD_D7_Direction at TRISD3_bit;
 
 // Inicia contagem em 60536 - base de tempo de 1 ms
+// TIMER0_LOAD_LOW ajustado para 0x9D por calibração com osciloscópio via
+// TIMER0_CALIBRATION_TEST.
 #define TIMER0_LOAD_HIGH 0xEC
-#define TIMER0_LOAD_LOW  0x89
+#define TIMER0_LOAD_LOW  0x9D
 
 // Portas do enconder
 #define ENCODER_SIGNAL_PORT PORTB.B3
@@ -81,8 +93,11 @@ sbit LCD_D7_Direction at TRISD3_bit;
 
 volatile u8 ProgramState = STATE_IDLE;
 
-// Limites atualizados para bater com o Aplicativo Android/Desktop (0 a 5000)
-#define MIN_PERIODO 0
+// Limites atualizados para bater com o Aplicativo Android/Desktop (1 a 5000).
+// MIN_PERIODO=0 permitia um chase degenerado de 0 ms: com TestPeriodo=0 o
+// Timer0 avançava os 32 LEDs em ~32 ms e o "acerto" virava "aperte
+// imediatamente ao iniciar o teste".
+#define MIN_PERIODO 1
 #define MAX_PERIODO 5000
 #define PERIODO_STEP 5
 
@@ -95,10 +110,37 @@ u8 CurrentLed = 0;
 #define TARGET_LED_NUMBER 25
 #define TARGET_LED_INDEX  (TARGET_LED_NUMBER - 1)
 
-// Variáveis para comunicação Bluetooth não-bloqueante
-char bl_buffer[10];
-u8 bl_idx = 0;
-u8 bl_receiving = 0;
+// Calibração do medidor de bateria, extraída de bancada em
+// "Docs/docs novo/Calibração medidor carga bateria.xlsx": ADC bruto de 12 bits
+// (AN0) medido a bateria vazia (0%) e cheia (100%). Regressão linear direta
+// sobre o valor cru do ADC, sem depender de assumir a razão do divisor
+// resistivo — a versão anterior assumia um divisor 2:1 (multiplicador *2.0)
+// que não bate com a razão real medida (~0.41741, ou seja, multiplicador
+// ~2.396), fazendo o indicador subestimar a carga real.
+#define BATTERY_ADC_EMPTY 2112
+#define BATTERY_ADC_FULL  2980
+
+// Arredonda a porcentagem para o degrau de 5% mais próximo em vez de truncar
+// para o inteiro abaixo. Isso resolve dois sintomas do mesmo problema: (1) o
+// indicador "piscando" entre N% e N-1% por causa de ruído de poucos contagens
+// do ADC perto de um limiar de 1%, e (2) a bateria cheia nunca mostrar 100%
+// por a leitura raramente cruzar o limiar exato de BATTERY_ADC_FULL — com o
+// arredondamento, toda uma faixa de leituras perto do topo (ou do fundo) cai
+// no mesmo degrau de 100% (ou 0%) em vez de depender de um limiar exato.
+#define BATTERY_PERCENT_STEP 5
+
+// Variáveis para comunicação Bluetooth, agora escritas pela ISR de recepção
+// do UART1 (ver interrupt()) e lidas pelo loop principal (ver
+// check_bluetooth()) — precisam ser volatile para o compilador não assumir
+// que só o código "de cima" as modifica.
+volatile char bl_buffer[10];
+volatile u8 bl_idx = 0;
+volatile u8 bl_receiving = 0;
+// Setada pela ISR quando um frame '<...>' completo chega; consumida pelo
+// loop principal, que faz o atoi()/UART1_Write() do ack fora da ISR (esses
+// UART1_Write bloqueiam ~1ms por byte a 9600 baud — não é algo que se queira
+// rodar dentro de uma interrupção).
+volatile u8 bl_frame_ready = 0;
 
 // Liga/desliga o módulo Bluetooth para economizar bateria (ligado por padrão)
 u8 BluetoothEnabled = 1;
@@ -182,8 +224,7 @@ void bl_send_reaction_time(i32 reaction_time) {
 
 // Confirma para o app se o novo período foi aplicado ('A') ou ignorado porque
 // um teste está em andamento ('B'). Um único caractere evita qualquer
-// ambiguidade com o payload numérico de bl_send_reaction_time(); ver
-// Docs/dev/PROTOCOL.md.
+// ambiguidade com o payload numérico de bl_send_reaction_time().
 void bl_send_period_ack(u8 applied) {
     UART1_Write('<');
     UART1_Write(applied ? 'A' : 'B');
@@ -192,7 +233,7 @@ void bl_send_period_ack(u8 applied) {
 
 // Um teste em andamento já calculou TimeMeantForUserReaction a partir do
 // TestPeriodo vigente; aceitar um novo valor nesse meio tempo desincroniza o
-// cálculo do tempo de reação da velocidade real do chaser (ver KNOWN_ISSUES).
+// cálculo do tempo de reação da velocidade real do chaser.
 u8 IsTestInProgress() {
     switch (ProgramState) {
         case STATE_STARTING_TEST:
@@ -206,37 +247,51 @@ u8 IsTestInProgress() {
     }
 }
 
-// Polling não bloqueante, verifica pacotes no buffer UART
+// Chamada pela ISR de recepção do UART1 (ver interrupt()) a cada byte
+// recebido. Só acumula no buffer e sinaliza bl_frame_ready — nunca faz
+// atoi()/UART1_Write() aqui dentro, já que isso bloquearia a interrupção por
+// vários ms (ver comentário de bl_frame_ready).
+void bl_handle_rx_byte(char byte) {
+    if (byte == '<') {
+        bl_receiving = 1;
+        bl_idx = 0;
+    } else if (byte == '>') {
+        bl_receiving = 0;
+        bl_buffer[bl_idx] = '\0';
+        bl_frame_ready = 1;
+    } else if (bl_receiving && bl_idx < 9) {
+        bl_buffer[bl_idx++] = byte;
+    }
+}
+
+// Chamada pelo loop principal a cada iteração: processa (fora da ISR) o
+// último frame '<...>' completo sinalizado por bl_handle_rx_byte(), se
+// houver algum pendente.
 void check_bluetooth() {
-    while (UART1_Data_Ready()) {
-        char byte = UART1_Read();
+    char local_buffer[10];
 
-        if (byte == '<') {
-            bl_receiving = 1;
-            bl_idx = 0;
-        } else if (byte == '>') {
-            bl_receiving = 0;
-            bl_buffer[bl_idx] = '\0';
+    if (!bl_frame_ready) return;
 
-            // Ignora o novo período durante um teste em andamento (ver
-            // IsTestInProgress) para não desincronizar o resultado; o pacote
-            // ainda é consumido normalmente para não travar o parser.
-            if (!IsTestInProgress()) {
-                // Converte o pacote string ASCII recebido pelo app em numérico
-                TestPeriodo = atoi(bl_buffer);
+    // Copia o buffer volatile para uma cópia local antes de processar, para
+    // não correr risco de a ISR começar a sobrescrevê-lo com o próximo frame
+    // no meio do atoi()/UART1_Write() abaixo.
+    strcpy(local_buffer, (char*)bl_buffer);
+    bl_frame_ready = 0;
 
-                // Aplica os Clampings
-                if (TestPeriodo < MIN_PERIODO) TestPeriodo = MIN_PERIODO;
-                if (TestPeriodo > MAX_PERIODO) TestPeriodo = MAX_PERIODO;
+    // Ignora o novo período durante um teste em andamento (ver
+    // IsTestInProgress) para não desincronizar o resultado; o pacote ainda é
+    // consumido normalmente para não travar o parser.
+    if (!IsTestInProgress()) {
+        // Converte o pacote string ASCII recebido pelo app em numérico
+        TestPeriodo = atoi(local_buffer);
 
-                bl_send_period_ack(1);
-            } else {
-                bl_send_period_ack(0);
-            }
+        // Aplica os Clampings
+        if (TestPeriodo < MIN_PERIODO) TestPeriodo = MIN_PERIODO;
+        if (TestPeriodo > MAX_PERIODO) TestPeriodo = MAX_PERIODO;
 
-        } else if (bl_receiving && bl_idx < 9) {
-            bl_buffer[bl_idx++] = byte;
-        }
+        bl_send_period_ack(1);
+    } else {
+        bl_send_period_ack(0);
     }
 }
 
@@ -249,14 +304,17 @@ void interrupt() {
         TMR0IF_bit  = 0x00;
         ReloadTimer0();
 
+#ifdef TIMER0_CALIBRATION_TEST
+        LATB5_bit = ~LATB5_bit;
+#endif
+
         if(ProgramState == STATE_RUNNING_TEST) {
             LedExposition++;
             TimeSinceTestStarted++;
 
             if(LedExposition >= TestPeriodo){
-                SET_LED_DMUX(CurrentLed);
-                CurrentLed++;
                 LedExposition = 0;
+                CurrentLed++;
 
                 if (CurrentLed >= NUM_LEDS) {
                     SET_LED_DMUX(0);
@@ -264,7 +322,29 @@ void interrupt() {
                     current_timer = TimeSinceTestStarted;
                     ReactionTimeDifference = (i32)current_timer - (i32)TimeMeantForUserReaction;
                     ProgramState = STATE_CALCULATE_TEST_RESULT;
+                } else {
+                    SET_LED_DMUX(CurrentLed);
                 }
+            }
+        }
+    }
+
+    // Recepção do UART1 por interrupção em vez de polling: check_bluetooth()
+    // sendo chamado só uma vez por iteração do loop principal (que faz várias
+    // escritas de LCD + leitura de ADC por volta em renderMenu()) deixava
+    // brechas grandes o bastante para um pacote <period_ms> nunca ser lido a
+    // tempo. A interrupção lê cada byte em poucos microssegundos, não importa
+    // o que o loop principal esteja fazendo. RCIE é desligado durante um
+    // teste em andamento (ver STATE_TEST_BEGIN/STATE_CALCULATE_TEST_RESULT)
+    // para não haver risco de essa interrupção atrasar a base de tempo do
+    // Timer0 durante a medição da reação.
+    if (RCIF_bit) {
+        if (OERR_bit) {
+            CREN_bit = 0;
+            CREN_bit = 1;
+        } else {
+            while (UART1_Data_Ready()) {
+                bl_handle_rx_byte(UART1_Read());
             }
         }
     }
@@ -315,7 +395,8 @@ void strcpy_ROM_to_RAM(char* ram_dest, const char* rom_src) {
 void renderMenu() {
     u8 i;
     char lcd_line_buffer[LCD_COLLUMN_COUNT];
-    float voltage;
+    float raw_percent;
+    i16 rounded_percent;
     volatile u32 adc_value;
     u8 percent;
 
@@ -334,11 +415,16 @@ void renderMenu() {
     }
 
     adc_value = Read_ADC_Manual();
-    voltage = ((float)(adc_value) * 5.0 / 4095.0) * 2.0;
+    raw_percent = (100.0 / (BATTERY_ADC_FULL - BATTERY_ADC_EMPTY)) *
+                  ((float)adc_value - BATTERY_ADC_EMPTY);
 
-    if (voltage >= 8.4) percent = 100;
-    else if (voltage <= 6.0) percent = 0;
-    else percent = (u8)((voltage - 6.0) * (100.0 / 2.4));
+    // Arredonda (não trunca) para o degrau de BATTERY_PERCENT_STEP mais
+    // próximo antes de fazer o clamp — ver comentário de BATTERY_PERCENT_STEP.
+    rounded_percent = (i16)((raw_percent / BATTERY_PERCENT_STEP) + 0.5) * BATTERY_PERCENT_STEP;
+
+    if (rounded_percent >= 100) percent = 100;
+    else if (rounded_percent <= 0) percent = 0;
+    else percent = (u8)rounded_percent;
 
     IntToStr(percent, lcd_line_buffer);
     Ltrim(lcd_line_buffer);
@@ -355,7 +441,7 @@ void renderPeriodoMenu() {
 
     IntToStr(TestPeriodo, periodo_buffer);
 
-    Lcd_Out(1, 1, "Período: ");
+    Lcd_Out(1, 1, "Periodo: ");
     Lcd_Out(2, 1, periodo_buffer);
     Lcd_Out_CP(" ms ");
 }
@@ -393,16 +479,29 @@ void main() {
     INT1IE_bit  = 0x01;                         
     INT2IE_bit  = 0x01;                         
 
-    TRISB   = 0xFF;                             
-    TRISD   = 0x00;                             
-    TRISE.B2= 0x00;                             
-    LATE.B2 = 0; 
+    TRISB   = 0xFF;
+
+#ifdef TIMER0_CALIBRATION_TEST
+    TRISB.B5 = 0x00;
+#endif
+
+    TRISD   = 0x00;
+    TRISE.B2= 0x00;
+    LATE.B2 = 0;
 
     // RWM BUG FIX: Inicializa e limpa toda a LATC usando o registrador Latch.
     TRISC = 0x00;
     LATC = 0x00;
 
-    ADCON1 = 0x0E;          
+    // UART1 RX (RC7) precisa ficar como ENTRADA para o receptor funcionar —
+    // a biblioteca UART1_Init() do mikroC só força o TX (RC6) para saída;
+    // ela não reconfigura o TRIS da linha RX. Deixado como saída (herdado do
+    // TRISC=0x00 acima), o pino é ativamente dirigido pelo próprio latch do
+    // PIC e nunca enxerga o sinal vindo do HC-05 — a transmissão continua
+    // funcionando normalmente porque RC6 já precisa ser saída mesmo.
+    TRISC.B7 = 1;
+
+    ADCON1 = 0x0E;
     ADCON2 = 0b10100101;    
     TRISA.B0 = 1;           
 
@@ -412,6 +511,14 @@ void main() {
 
     UART1_Init(9600);
     Delay_ms(100);
+
+    // Recepção do UART1 passa a ser por interrupção (ver interrupt()) em vez
+    // de polling — PEIE_bit já está ligado via INTCON=0xF0 acima. Desligado
+    // durante um teste em andamento (ver STATE_TEST_BEGIN/
+    // STATE_CALCULATE_TEST_RESULT) para não arriscar jitter na base de tempo
+    // do Timer0 durante a medição da reação.
+    RCIF_bit = 0;
+    RCIE_bit = 1;
 
     ApplyBluetoothState();
 
@@ -449,8 +556,8 @@ void main() {
                 Lcd_Cmd(_LCD_CLEAR);
 
                 Lcd_Out(1, 1, "Teste pronto.");
-                Lcd_Out(2, 1, "Aperte o botão de teste");
-                Lcd_Out(3, 1, "para começar");
+                Lcd_Out(2, 1, "Aperte o botao de teste");
+                Lcd_Out(3, 1, "para comecar");
 
                 LedExposition = 0;
                 TimeSinceTestStarted = 0;
@@ -465,6 +572,17 @@ void main() {
             break;
             case STATE_TEST_BEGIN:
                 TMR0IE_bit = 1;
+
+                // Desliga a interrupção de recepção do UART1 enquanto o teste
+                // roda (ver comentário em main()/interrupt()) — nenhum pacote
+                // é aceito nesse intervalo mesmo (ver IsTestInProgress()), e
+                // isso garante que a ISR do UART1 não possa competir por
+                // tempo de CPU com a base de tempo do Timer0 durante a
+                // medição da reação. Bytes que chegarem nesse meio tempo só
+                // ficam pendentes no buffer de hardware (2 bytes) até serem
+                // religados abaixo, em STATE_CALCULATE_TEST_RESULT.
+                RCIE_bit = 0;
+
                 Lcd_Cmd(_LCD_CLEAR);
                 Lcd_Out(1, 1, "Testando...");
                 ProgramState = STATE_RUNNING_TEST;
@@ -481,7 +599,7 @@ void main() {
                 Delay_ms(5); 
 
                 memset(&lcd_line_buffer, ' ', LCD_COLLUMN_COUNT);
-                strcpy(lcd_line_buffer, "Reação: ");
+                strcpy(lcd_line_buffer, "Reacao: ");
 
                 LongToStr(ReactionTimeDifference, conversions_buffer);
                 Ltrim(conversions_buffer);
@@ -490,7 +608,40 @@ void main() {
                 strcat(lcd_line_buffer, " ms");
 
                 Lcd_Out(1, 1, lcd_line_buffer);
+
+                // Mostra a janela [0, TestPeriodo) considerada "no alvo" e
+                // classifica o resultado.
+                memset(&lcd_line_buffer, ' ', LCD_COLLUMN_COUNT);
+                strcpy(lcd_line_buffer, "Alvo: 0 a ");
+                LongToStr(TestPeriodo, conversions_buffer);
+                Ltrim(conversions_buffer);
+                strcat(lcd_line_buffer, conversions_buffer);
+                strcat(lcd_line_buffer, " ms");
+                Lcd_Out(2, 1, lcd_line_buffer);
+
+                memset(&lcd_line_buffer, ' ', LCD_COLLUMN_COUNT);
+                if (ReactionTimeDifference < 0) {
+                    strcpy(lcd_line_buffer, "Cedo");
+                } else if (ReactionTimeDifference < TestPeriodo) {
+                    strcpy(lcd_line_buffer, "No alvo");
+                } else {
+                    strcpy(lcd_line_buffer, "Atrasado");
+                }
+                Lcd_Out(3, 1, lcd_line_buffer);
+
                 ProgramState = STATE_FINISHED_TEST;
+
+                // Religa a recepção do UART1. Limpa um possível overrun
+                // (RCSTA.OERR) primeiro: bytes podem ter se acumulado no
+                // buffer de 2 bytes do hardware durante o teste (CREN nunca
+                // foi desligado, só a interrupção RCIE) e travado a recepção
+                // sem que a ISR estivesse ativa para perceber e corrigir.
+                if (OERR_bit) {
+                    CREN_bit = 0;
+                    CREN_bit = 1;
+                }
+                RCIF_bit = 0;
+                RCIE_bit = 1;
 
                 UnpauseTimer0();
             break;

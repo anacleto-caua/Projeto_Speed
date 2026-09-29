@@ -19,6 +19,12 @@ except Exception:
 # value once exhausted instead of growing forever.
 RECONNECT_DELAYS = [1, 2, 4, 8, 15]
 
+# Matches the firmware's own MIN_PERIODO/MAX_PERIODO clamp. The slider itself
+# still spans 0..5000 for backward compatibility, but the typed entry field
+# clamps to what the firmware will actually accept.
+MIN_INTERVAL_MS = 1
+MAX_INTERVAL_MS = 5000
+
 
 class ConnectionState:
     DISCONNECTED = "Disconnected"
@@ -121,8 +127,20 @@ class BluetoothApp:
             command=self.update_slider_label
         )
         self.slider.pack(fill=tk.X)
-        self.lbl_slider = ttk.Label(slider_frame, text="Value: 100")
-        self.lbl_slider.pack()
+
+        # Typed entry, kept in sync with the slider both ways: dragging the
+        # slider updates this field (see update_slider_label), and committing
+        # a typed value (Enter or focus-out) clamps it to
+        # MIN_INTERVAL_MS..MAX_INTERVAL_MS and moves the slider to match.
+        entry_row = ttk.Frame(slider_frame)
+        entry_row.pack(pady=(5, 0))
+        ttk.Label(entry_row, text="Value:").pack(side=tk.LEFT)
+        self.interval_entry_var = tk.StringVar(value="100")
+        self.interval_entry = ttk.Entry(entry_row, textvariable=self.interval_entry_var, width=8, justify=tk.CENTER)
+        self.interval_entry.pack(side=tk.LEFT, padx=5)
+        self.interval_entry.bind("<Return>", self._commit_interval_entry)
+        self.interval_entry.bind("<FocusOut>", self._commit_interval_entry)
+        ttk.Label(entry_row, text="ms").pack(side=tk.LEFT)
 
         self.btn_send = ttk.Button(slider_frame, text="Send via Bluetooth", command=self.send_interval, state=tk.DISABLED)
         self.btn_send.pack(pady=5)
@@ -173,7 +191,19 @@ class BluetoothApp:
 
     def update_slider_label(self, event):
         value = self.interval_val.get()
-        self.lbl_slider.config(text=f"Value: {value}")
+        self.interval_entry_var.set(str(value))
+        self.last_known_interval = value
+
+    def _commit_interval_entry(self, event=None):
+        text = self.interval_entry_var.get().strip()
+        try:
+            value = int(text)
+        except ValueError:
+            value = self.interval_val.get()  # revert to the last valid value
+
+        value = max(MIN_INTERVAL_MS, min(MAX_INTERVAL_MS, value))
+        self.interval_val.set(value)  # also moves the slider (shared IntVar)
+        self.interval_entry_var.set(str(value))
         self.last_known_interval = value
 
     def log_to_console(self, text):
@@ -361,9 +391,9 @@ class BluetoothApp:
 
             payload = buffer[start_idx + 1:end_idx]
 
-            # Period-set acknowledgment from the firmware (see PROTOCOL.md):
-            # 'A' = applied, 'B' = ignored because a test is running. Not a
-            # reaction-time result, so it's handled and consumed separately.
+            # Period-set acknowledgment from the firmware: 'A' = applied,
+            # 'B' = ignored because a test is running. Not a reaction-time
+            # result, so it's handled and consumed separately.
             if payload in ("A", "B"):
                 if payload == "A":
                     self._log("System: Interval update applied by firmware.", my_gen)
@@ -377,7 +407,20 @@ class BluetoothApp:
             # DIRTY DATA CHECK - matches AndroidSpeed's -?\d+(\.\d+)? regex so
             # a valid negative (early) reaction isn't mislabeled BAD_DATA.
             is_valid = bool(re.fullmatch(r'-?\d+(\.\d+)?', reaction_time))
-            status = "OK" if is_valid else "BAD_DATA"
+
+            if not is_valid:
+                status = "BAD_DATA"
+            else:
+                # Classify against the app's tracked copy of the firmware's
+                # TestPeriodo: [0, TestPeriodo) means the press landed while
+                # the target LED was actually lit.
+                value = float(reaction_time)
+                if value < 0:
+                    status = "EARLY"
+                elif value < self.last_known_interval:
+                    status = "ON_TARGET"
+                else:
+                    status = "LATE"
 
             current_name = self.name_var.get().strip() or "Unknown"
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
