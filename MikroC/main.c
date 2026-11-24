@@ -76,16 +76,33 @@ sbit LCD_D7_Direction at TRISD3_bit;
 #define BLUETOOTH_OFF_LEVEL 1  // Nível alto  = Bluetooth desligado
 
 // Possiveis estados do programa
-#define STATE_IDLE                  0
-#define STATE_INIT_RENDER_MENU      1
-#define STATE_SELECTING_MENU        2
-#define STATE_STARTING_TEST         3
-#define STATE_TEST_READY            4
-#define STATE_TEST_BEGIN            5
-#define STATE_RUNNING_TEST          6
-#define STATE_CALCULATE_TEST_RESULT 7
-#define STATE_FINISHED_TEST         8
-#define STATE_ERROR                 9
+#define STATE_IDLE                       0
+#define STATE_INIT_RENDER_MENU           1
+#define STATE_SELECTING_MENU             2
+// Assistente de configuração da bateria de testes aleatórios ("Aleatorio" no
+// menu): cada passo tem um estado "INIT_" que só limpa o LCD (os rótulos de
+// cada passo têm tamanhos diferentes, então reaproveitar a tela sem limpar
+// deixaria pedaços do texto anterior visíveis) e um estado companheiro que
+// de fato lê o encoder e redesenha a cada volta do loop principal.
+#define STATE_INIT_RANDOM_CONFIG_COUNT   3
+#define STATE_RANDOM_CONFIG_COUNT        4
+#define STATE_INIT_RANDOM_CONFIG_REPEATS 5
+#define STATE_RANDOM_CONFIG_REPEATS      6
+#define STATE_INIT_RANDOM_CONFIG_VALUE   7
+#define STATE_RANDOM_CONFIG_VALUE        8
+// Estados "INIT_" sem tela própria: só fazem o trabalho pesado (gravar
+// EEPROM, sortear a ordem dos testes) fora da ISR antes de cair em
+// STATE_STARTING_TEST — ver comentário de BatteryActive.
+#define STATE_INIT_RANDOM_BATTERY        9
+#define STATE_INIT_RANDOM_BATTERY_REPEAT 10
+#define STATE_RANDOM_BATTERY_RESULT      11
+#define STATE_STARTING_TEST              12
+#define STATE_TEST_READY                 13
+#define STATE_TEST_BEGIN                 14
+#define STATE_RUNNING_TEST               15
+#define STATE_CALCULATE_TEST_RESULT      16
+#define STATE_FINISHED_TEST              17
+#define STATE_ERROR                      18
 
 volatile u8 ProgramState = STATE_IDLE;
 
@@ -145,6 +162,135 @@ void ApplyBluetoothState() {
     BLUETOOTH_CONTROL_PORT = BluetoothEnabled ? BLUETOOTH_ON_LEVEL : BLUETOOTH_OFF_LEVEL;
 }
 
+// ---------------- BATERIA DE TESTES ALEATÓRIOS ("Aleatorio") ----------------
+//
+// O menu "Aleatorio" roda N testes de cada um de até M valores de período
+// escolhidos pelo usuário (M <= MAX_BATTERY_VALUES), em ordem embaralhada, e
+// no final mostra a média de desvio em relação ao alvo. MAX_BATTERY_VALUES é
+// pequeno de propósito: o PIC18F4423 só tem 768 bytes de RAM no total (ver
+// datasheet), e cada valor extra também significa mais uma tela do
+// assistente para o usuário preencher à mão.
+#define MAX_BATTERY_VALUES  8
+#define MAX_BATTERY_REPEATS 99
+
+// Config "oficial" (já confirmada e persistida em EEPROM) vs. "pendente"
+// (sendo editada no assistente, ver STATE_RANDOM_CONFIG_*): só vira oficial
+// quando o assistente termina (ver CommitBatteryConfig()), para que cancelar
+// no meio (ver AleatorioOnClick()/BatteryValueCount==0) nunca estrague uma
+// configuração já salva.
+u8  BatteryValueCount = 0;        // M: quantos valores distintos
+u8  BatteryRepeatsPerValue = 10;  // N: repetições por valor
+i16 BatteryValues[MAX_BATTERY_VALUES];
+
+u8  PendingValueCount;
+u8  PendingRepeatsPerValue;
+i16 PendingValues[MAX_BATTERY_VALUES];
+u8  RandomConfigValueIndex = 0;   // qual valor (0..PendingValueCount-1) está sendo editado agora
+
+// Estado de uma bateria em andamento/concluída. BatteryActive distingue o
+// caminho "bateria" do caminho normal de teste único exatamente nos dois
+// pontos em que os dois fluxos se tocam: STATE_STARTING_TEST (texto exibido)
+// e STATE_CALCULATE_TEST_RESULT (o que acontece depois de calcular o
+// resultado). O resto da máquina de teste (TEST_READY/TEST_BEGIN/
+// RUNNING_TEST) não muda em nada entre os dois modos.
+volatile u8 BatteryActive = 0;
+u8  BatteryRemaining[MAX_BATTERY_VALUES]; // repetições restantes de cada valor
+u16 BatteryTestsTotal = 0;                // M*N
+u16 BatteryTestsRemaining = 0;
+i32 BatterySumSigned = 0; // soma de ReactionTimeDifference (revela viés cedo/atrasado)
+i32 BatterySumAbs = 0;    // soma de |ReactionTimeDifference| (o quão longe do alvo, em média)
+u8  BatteryResultSelection = 0; // tela final: 0 = "Repetir", 1 = "Menu"
+
+// ---- PRNG ----
+// O PIC não tem gerador de números aleatórios por hardware nem um pino
+// analógico flutuante sobrando para colher ruído. Para embaralhar a ordem
+// dos testes isso é suficiente: não precisa ser criptograficamente
+// aleatório, só difícil do testador prever. FreeRunningTicks conta a cada
+// 1ms (ver interrupt()) independente do estado do programa, então o
+// instante exato em que o usuário clica para confirmar o último valor do
+// assistente é uma semente de fato imprevisível.
+volatile u16 FreeRunningTicks = 0;
+u32 RandomSeedState = 1;
+
+void SeedRandom(u16 seed) {
+    RandomSeedState = seed ? seed : 1;
+}
+
+u16 NextRandom() {
+    // LCG (parâmetros clássicos de Numerical Recipes); descarta os bits
+    // baixos, que num LCG são os menos aleatórios.
+    RandomSeedState = RandomSeedState * 1103515245UL + 12345UL;
+    return (u16)(RandomSeedState >> 8);
+}
+
+// ---- Persistência em EEPROM ----
+// Layout: [0]=byte mágico, [1]=M, [2]=N, [3..] = MAX_BATTERY_VALUES valores
+// de 16 bits (little-endian). O byte mágico é gravado por último em
+// SaveBatteryConfigToEEPROM() de propósito: se a energia cair no meio da
+// gravação, uma leitura seguinte vê o mágico antigo (ou nenhum, numa EEPROM
+// de fábrica) e descarta tudo em vez de confiar num config parcialmente
+// escrito.
+#define EEPROM_MAGIC_ADDR   0
+#define EEPROM_MAGIC_VALUE  0xB7
+#define EEPROM_COUNT_ADDR   1
+#define EEPROM_REPEATS_ADDR 2
+#define EEPROM_VALUES_ADDR  3
+
+void SaveBatteryConfigToEEPROM() {
+    u8 i;
+    EEPROM_Write(EEPROM_COUNT_ADDR, BatteryValueCount);
+    EEPROM_Write(EEPROM_REPEATS_ADDR, BatteryRepeatsPerValue);
+    for (i = 0; i < MAX_BATTERY_VALUES; i++) {
+        EEPROM_Write(EEPROM_VALUES_ADDR + i * 2,     (u8)(BatteryValues[i] & 0xFF));
+        EEPROM_Write(EEPROM_VALUES_ADDR + i * 2 + 1, (u8)((BatteryValues[i] >> 8) & 0xFF));
+    }
+    EEPROM_Write(EEPROM_MAGIC_ADDR, EEPROM_MAGIC_VALUE);
+}
+
+void LoadBatteryConfigFromEEPROM() {
+    u8 i, lo, hi;
+
+    if (EEPROM_Read(EEPROM_MAGIC_ADDR) != EEPROM_MAGIC_VALUE) {
+        // Nunca configurado (ou EEPROM "de fábrica", toda 0xFF) — usa padrões
+        // em vez de decodificar lixo.
+        BatteryValueCount = 0;
+        BatteryRepeatsPerValue = 10;
+        for (i = 0; i < MAX_BATTERY_VALUES; i++) BatteryValues[i] = TestPeriodo;
+        return;
+    }
+
+    BatteryValueCount = EEPROM_Read(EEPROM_COUNT_ADDR);
+    if (BatteryValueCount > MAX_BATTERY_VALUES) BatteryValueCount = MAX_BATTERY_VALUES;
+
+    BatteryRepeatsPerValue = EEPROM_Read(EEPROM_REPEATS_ADDR);
+    if (BatteryRepeatsPerValue < 1 || BatteryRepeatsPerValue > MAX_BATTERY_REPEATS) {
+        BatteryRepeatsPerValue = 10;
+    }
+
+    for (i = 0; i < MAX_BATTERY_VALUES; i++) {
+        lo = EEPROM_Read(EEPROM_VALUES_ADDR + i * 2);
+        hi = EEPROM_Read(EEPROM_VALUES_ADDR + i * 2 + 1);
+        BatteryValues[i] = (i16)(((u16)hi << 8) | lo);
+        if (BatteryValues[i] < MIN_PERIODO || BatteryValues[i] > MAX_PERIODO) {
+            BatteryValues[i] = TestPeriodo;
+        }
+    }
+}
+
+// Clique em "Aleatorio": copia o último config confirmado (vindo da EEPROM
+// no boot, ou do assistente anterior) para as variáveis "pendentes" do
+// assistente — reabrir o assistente começa de onde parou, em vez de do
+// zero — e entra no primeiro passo (quantidade de valores).
+void AleatorioOnClick() {
+    u8 i;
+    PendingValueCount = BatteryValueCount;
+    PendingRepeatsPerValue = BatteryRepeatsPerValue;
+    for (i = 0; i < MAX_BATTERY_VALUES; i++) {
+        PendingValues[i] = BatteryValues[i];
+    }
+    ProgramState = STATE_INIT_RANDOM_CONFIG_COUNT;
+}
+
 // Período e Bluetooth são editados in-line na própria tela de menu (ver
 // renderMenu()) em vez de abrirem uma tela própria: um clique no item
 // "trava" a rotação do encoder nesse item (em vez de navegar entre os
@@ -169,14 +315,16 @@ void IniciarOnClick() {
 typedef void (*OnClickFunc)(void);
 typedef struct { StrView Name; OnClickFunc OnClick; } MenuOption;
 
-#define NUM_MENU_ITEMS 3
+#define NUM_MENU_ITEMS 4
 #define MENU_ITEM_PERIODO   0
 #define MENU_ITEM_BLUETOOTH 1
-#define MENU_ITEM_INICIAR   2
+#define MENU_ITEM_ALEATORIO 2
+#define MENU_ITEM_INICIAR   3
 
 const MenuOption MenuItems[NUM_MENU_ITEMS] = {
     { MAKE_VIEW("Periodo"),   ToggleMenuLock },
     { MAKE_VIEW("Bluetooth"), ToggleMenuLock },
+    { MAKE_VIEW("Aleatorio"), AleatorioOnClick },
     { MAKE_VIEW("Iniciar"),   IniciarOnClick }
 };
 
@@ -303,6 +451,7 @@ void interrupt() {
     if(TMR0IF_bit) {
         TMR0IF_bit  = 0x00;
         ReloadTimer0();
+        FreeRunningTicks++; // ver comentário de FreeRunningTicks (semente do PRNG da bateria aleatória)
 
 #ifdef TIMER0_CALIBRATION_TEST
         LATB5_bit = ~LATB5_bit;
@@ -371,6 +520,37 @@ void interrupt() {
             break;
             case STATE_SELECTING_MENU:
                 MenuItems[SelectedMenuOption].OnClick();
+            break;
+            // Assistente da bateria aleatória: cada clique confirma o passo
+            // atual e avança para o próximo (ver comentário dos estados
+            // STATE_RANDOM_CONFIG_* / STATE_INIT_RANDOM_*). Só a transição
+            // de estado acontece aqui dentro da ISR — gravar na EEPROM e
+            // sortear a ordem dos testes são operações "pesadas" demais
+            // para uma interrupção, então ficam em STATE_INIT_RANDOM_BATTERY
+            // / STATE_INIT_RANDOM_BATTERY_REPEAT, tratadas no loop principal.
+            case STATE_RANDOM_CONFIG_COUNT:
+                if (PendingValueCount == 0) {
+                    ProgramState = STATE_INIT_RENDER_MENU; // M=0 é "Cancelar"
+                } else {
+                    ProgramState = STATE_INIT_RANDOM_CONFIG_REPEATS;
+                }
+            break;
+            case STATE_RANDOM_CONFIG_REPEATS:
+                RandomConfigValueIndex = 0;
+                ProgramState = STATE_INIT_RANDOM_CONFIG_VALUE;
+            break;
+            case STATE_RANDOM_CONFIG_VALUE:
+                RandomConfigValueIndex++;
+                if (RandomConfigValueIndex >= PendingValueCount) {
+                    ProgramState = STATE_INIT_RANDOM_BATTERY;
+                } else {
+                    ProgramState = STATE_INIT_RANDOM_CONFIG_VALUE;
+                }
+            break;
+            case STATE_RANDOM_BATTERY_RESULT:
+                ProgramState = (BatteryResultSelection == 0)
+                    ? STATE_INIT_RANDOM_BATTERY_REPEAT
+                    : STATE_INIT_RENDER_MENU;
             break;
         }
     }
@@ -486,6 +666,191 @@ void renderMenu() {
     Lcd_Out(4, LCD_COLLUMN_COUNT, "%");
 }
 
+// ---- Telas do assistente "Aleatorio" (STATE_RANDOM_CONFIG_*) ----
+// Mesmo padrão de Período/Bluetooth: o encoder ajusta o campo, o clique (na
+// ISR, ver interrupt()) confirma e avança. Cada uma destas é redesenhada a
+// cada volta do loop principal sem Lcd_Cmd(_LCD_CLEAR) — só o texto que de
+// fato varia é reescrito, usando PadToWidth() para apagar sobras de um
+// valor mais longo; o estado STATE_INIT_* que antecede cada uma já limpou a
+// tela uma vez na entrada (os rótulos fixos mudam de tamanho de uma tela
+// para outra).
+
+void renderBatteryCountConfig() {
+    char line_buffer[LCD_COLLUMN_COUNT];
+    i8 new_count;
+
+    new_count = (i8)PendingValueCount + getEncoderInput();
+    if (new_count < 0) new_count = MAX_BATTERY_VALUES;
+    else if (new_count > MAX_BATTERY_VALUES) new_count = 0;
+    PendingValueCount = (u8)new_count;
+
+    Lcd_Out(1, 1, "Aleatorio: qtd. de");
+    Lcd_Out(2, 1, "valores");
+
+    if (PendingValueCount == 0) {
+        strcpy(line_buffer, "0 (cancelar)");
+    } else {
+        IntToStr(PendingValueCount, line_buffer);
+        Ltrim(line_buffer);
+    }
+    PadToWidth(line_buffer, LCD_COLLUMN_COUNT - 1);
+    Lcd_Out(3, 1, line_buffer);
+
+    Lcd_Out(4, 1, "Clique p/ confirmar");
+}
+
+void renderBatteryRepeatsConfig() {
+    char line_buffer[LCD_COLLUMN_COUNT];
+    i16 new_repeats;
+
+    new_repeats = (i16)PendingRepeatsPerValue + getEncoderInput();
+    if (new_repeats < 1) new_repeats = MAX_BATTERY_REPEATS;
+    else if (new_repeats > MAX_BATTERY_REPEATS) new_repeats = 1;
+    PendingRepeatsPerValue = (u8)new_repeats;
+
+    Lcd_Out(1, 1, "Testes por valor:");
+
+    IntToStr(PendingRepeatsPerValue, line_buffer);
+    Ltrim(line_buffer);
+    PadToWidth(line_buffer, LCD_COLLUMN_COUNT - 1);
+    Lcd_Out(2, 1, line_buffer);
+
+    Lcd_Out(4, 1, "Clique p/ confirmar");
+}
+
+void renderBatteryValueConfig() {
+    char line_buffer[LCD_COLLUMN_COUNT];
+    char num_buffer[7];
+    i16 current;
+
+    current = PendingValues[RandomConfigValueIndex] + getEncoderInput() * PERIODO_STEP;
+    if (current > MAX_PERIODO) current = MIN_PERIODO;
+    if (current < MIN_PERIODO) current = MAX_PERIODO;
+    PendingValues[RandomConfigValueIndex] = current;
+
+    strcpy(line_buffer, "Valor ");
+    IntToStr(RandomConfigValueIndex + 1, num_buffer);
+    Ltrim(num_buffer);
+    strcat(line_buffer, num_buffer);
+    strcat(line_buffer, " de ");
+    IntToStr(PendingValueCount, num_buffer);
+    Ltrim(num_buffer);
+    strcat(line_buffer, num_buffer);
+    strcat(line_buffer, ":");
+    PadToWidth(line_buffer, LCD_COLLUMN_COUNT - 1);
+    Lcd_Out(1, 1, line_buffer);
+
+    IntToStr(current, num_buffer);
+    Ltrim(num_buffer);
+    strcpy(line_buffer, num_buffer);
+    strcat(line_buffer, " ms");
+    PadToWidth(line_buffer, LCD_COLLUMN_COUNT - 1);
+    Lcd_Out(2, 1, line_buffer);
+
+    Lcd_Out(4, 1, "Clique p/ confirmar");
+}
+
+// Tela final da bateria: mostra os dois agregados (desvio médio absoluto e
+// médio com sinal) e um seletor de 2 opções na última linha — o encoder
+// alterna entre "Repetir"/"Menu" (girar em qualquer direção já que só há 2
+// opções) e o clique (ver interrupt()) confirma a escolha.
+void renderBatteryResult() {
+    char line_buffer[LCD_COLLUMN_COUNT];
+    char num_buffer[12];
+    i8 encoder_delta;
+
+    encoder_delta = getEncoderInput();
+    if (encoder_delta != 0) BatteryResultSelection = !BatteryResultSelection;
+
+    Lcd_Out(1, 1, "Bateria concluida");
+
+    strcpy(line_buffer, "Media: ");
+    LongToStr(BatterySumSigned / (i32)BatteryTestsTotal, num_buffer);
+    Ltrim(num_buffer);
+    strcat(line_buffer, num_buffer);
+    strcat(line_buffer, " ms");
+    PadToWidth(line_buffer, LCD_COLLUMN_COUNT - 1);
+    Lcd_Out(2, 1, line_buffer);
+
+    strcpy(line_buffer, "Desvio abs: ");
+    LongToStr(BatterySumAbs / (i32)BatteryTestsTotal, num_buffer);
+    Ltrim(num_buffer);
+    strcat(line_buffer, num_buffer);
+    strcat(line_buffer, " ms");
+    PadToWidth(line_buffer, LCD_COLLUMN_COUNT - 1);
+    Lcd_Out(3, 1, line_buffer);
+
+    if (BatteryResultSelection == 0) {
+        Lcd_Out(4, 1, ">Repetir");
+        Lcd_Out(4, 12, " Menu");
+    } else {
+        Lcd_Out(4, 1, " Repetir");
+        Lcd_Out(4, 12, ">Menu");
+    }
+}
+
+// ---- Execução da bateria ----
+
+void CommitBatteryConfig() {
+    u8 i;
+    BatteryValueCount = PendingValueCount;
+    BatteryRepeatsPerValue = PendingRepeatsPerValue;
+    for (i = 0; i < MAX_BATTERY_VALUES; i++) {
+        BatteryValues[i] = PendingValues[i];
+    }
+    SaveBatteryConfigToEEPROM();
+}
+
+// Sorteio ponderado sem reposição: escolhe o índice i com probabilidade
+// proporcional a BatteryRemaining[i] dentre o total ainda restante
+// (BatteryTestsRemaining) — garante que, no fim, cada valor tenha rodado
+// exatamente BatteryRepeatsPerValue vezes, sem precisar guardar a sequência
+// inteira de M*N testes (ver comentário de MAX_BATTERY_VALUES sobre RAM).
+u8 PickNextBatteryValueIndex() {
+    u16 r, running;
+    u8 i;
+
+    r = NextRandom() % BatteryTestsRemaining;
+    running = 0;
+    for (i = 0; i < BatteryValueCount; i++) {
+        running += BatteryRemaining[i];
+        if (r < running) return i;
+    }
+    return BatteryValueCount - 1; // nunca deveria chegar aqui
+}
+
+// Sorteia e reserva o valor do próximo sub-teste (decrementando sua conta de
+// repetições restantes e o total restante) e já o aplica em TestPeriodo,
+// que STATE_STARTING_TEST lê normalmente. Chamada uma vez ao iniciar a
+// bateria (ResetBatteryRun()) e mais uma vez após cada sub-teste enquanto
+// sobrarem testes (ver STATE_CALCULATE_TEST_RESULT).
+void AdvanceToNextBatteryValue() {
+    u8 idx = PickNextBatteryValueIndex();
+    BatteryRemaining[idx]--;
+    BatteryTestsRemaining--;
+    TestPeriodo = BatteryValues[idx];
+}
+
+// Zera os contadores de uma bateria (nova ou repetida) e sorteia o primeiro
+// valor. Não grava EEPROM — isso só acontece ao sair do assistente (ver
+// CommitBatteryConfig()), já que repetir a mesma bateria não muda a
+// configuração salva.
+void ResetBatteryRun() {
+    u8 i;
+    for (i = 0; i < BatteryValueCount; i++) {
+        BatteryRemaining[i] = BatteryRepeatsPerValue;
+    }
+    BatteryTestsTotal = (u16)BatteryValueCount * (u16)BatteryRepeatsPerValue;
+    BatteryTestsRemaining = BatteryTestsTotal;
+    BatterySumSigned = 0;
+    BatterySumAbs = 0;
+    BatteryActive = 1;
+
+    SeedRandom((u16)Read_ADC_Manual() ^ FreeRunningTicks);
+
+    AdvanceToNextBatteryValue();
+}
+
 void main() {
     char lcd_line_buffer[LCD_COLLUMN_COUNT];    
     char conversions_buffer[15];                
@@ -550,6 +915,7 @@ void main() {
     RCIE_bit = 1;
 
     ApplyBluetoothState();
+    LoadBatteryConfigFromEEPROM();
 
     while(1) {
         // Escuta constantemente atualizações Bluetooth do Android/Desktop
@@ -562,18 +928,69 @@ void main() {
             case STATE_INIT_RENDER_MENU:
                 Lcd_Cmd(_LCD_CLEAR);
                 MenuLocked = 0;
+                BatteryActive = 0;
                 ProgramState = STATE_SELECTING_MENU;
             break;
             case STATE_SELECTING_MENU:
                 renderMenu();
             break;
+            case STATE_INIT_RANDOM_CONFIG_COUNT:
+                Lcd_Cmd(_LCD_CLEAR);
+                ProgramState = STATE_RANDOM_CONFIG_COUNT;
+            break;
+            case STATE_RANDOM_CONFIG_COUNT:
+                renderBatteryCountConfig();
+            break;
+            case STATE_INIT_RANDOM_CONFIG_REPEATS:
+                Lcd_Cmd(_LCD_CLEAR);
+                ProgramState = STATE_RANDOM_CONFIG_REPEATS;
+            break;
+            case STATE_RANDOM_CONFIG_REPEATS:
+                renderBatteryRepeatsConfig();
+            break;
+            case STATE_INIT_RANDOM_CONFIG_VALUE:
+                Lcd_Cmd(_LCD_CLEAR);
+                ProgramState = STATE_RANDOM_CONFIG_VALUE;
+            break;
+            case STATE_RANDOM_CONFIG_VALUE:
+                renderBatteryValueConfig();
+            break;
+            case STATE_INIT_RANDOM_BATTERY:
+                CommitBatteryConfig();
+                ResetBatteryRun();
+                ProgramState = STATE_STARTING_TEST;
+            break;
+            case STATE_INIT_RANDOM_BATTERY_REPEAT:
+                ResetBatteryRun();
+                ProgramState = STATE_STARTING_TEST;
+            break;
+            case STATE_RANDOM_BATTERY_RESULT:
+                renderBatteryResult();
+            break;
             case STATE_STARTING_TEST:
                 TMR0IE_bit = 0;
                 Lcd_Cmd(_LCD_CLEAR);
 
-                Lcd_Out(1, 1, "Teste pronto.");
-                Lcd_Out(2, 1, "Aperte o botao de teste");
-                Lcd_Out(3, 1, "para comecar");
+                if (BatteryActive) {
+                    Lcd_Out(1, 1, "Bateria aleatoria");
+
+                    strcpy(lcd_line_buffer, "Teste ");
+                    IntToStr(BatteryTestsTotal - BatteryTestsRemaining, conversions_buffer);
+                    Ltrim(conversions_buffer);
+                    strcat(lcd_line_buffer, conversions_buffer);
+                    strcat(lcd_line_buffer, " de ");
+                    IntToStr(BatteryTestsTotal, conversions_buffer);
+                    Ltrim(conversions_buffer);
+                    strcat(lcd_line_buffer, conversions_buffer);
+                    Lcd_Out(2, 1, lcd_line_buffer);
+
+                    Lcd_Out(3, 1, "Aperte o botao de");
+                    Lcd_Out(4, 1, "teste para comecar");
+                } else {
+                    Lcd_Out(1, 1, "Teste pronto.");
+                    Lcd_Out(2, 1, "Aperte o botao de teste");
+                    Lcd_Out(3, 1, "para comecar");
+                }
 
                 LedExposition = 0;
                 TimeSinceTestStarted = 0;
@@ -608,44 +1025,66 @@ void main() {
             case STATE_CALCULATE_TEST_RESULT:
                 PauseTimer0();
 
-                // Envia o Resultado para o App via Bluetooth
+                // Envia o Resultado para o App via Bluetooth — em ambos os
+                // modos: numa bateria, cada sub-teste ainda é enviado em
+                // tempo real como sempre foi, o app só ainda não sabe que
+                // faz parte de uma bateria (ver Docs/dev/FIRMWARE.md).
                 bl_send_reaction_time(ReactionTimeDifference);
 
                 Lcd_Cmd(_LCD_CLEAR);
-                Delay_ms(5); 
+                Delay_ms(5);
 
-                memset(&lcd_line_buffer, ' ', LCD_COLLUMN_COUNT);
-                strcpy(lcd_line_buffer, "Reacao: ");
+                if (BatteryActive) {
+                    BatterySumSigned += ReactionTimeDifference;
+                    BatterySumAbs += (ReactionTimeDifference < 0)
+                        ? -ReactionTimeDifference
+                        : ReactionTimeDifference;
 
-                LongToStr(ReactionTimeDifference, conversions_buffer);
-                Ltrim(conversions_buffer);
-
-                strcat(lcd_line_buffer, conversions_buffer);
-                strcat(lcd_line_buffer, " ms");
-
-                Lcd_Out(1, 1, lcd_line_buffer);
-
-                // Mostra a janela [0, TestPeriodo) considerada "no alvo" e
-                // classifica o resultado.
-                memset(&lcd_line_buffer, ' ', LCD_COLLUMN_COUNT);
-                strcpy(lcd_line_buffer, "Alvo: 0 a ");
-                LongToStr(TestPeriodo, conversions_buffer);
-                Ltrim(conversions_buffer);
-                strcat(lcd_line_buffer, conversions_buffer);
-                strcat(lcd_line_buffer, " ms");
-                Lcd_Out(2, 1, lcd_line_buffer);
-
-                memset(&lcd_line_buffer, ' ', LCD_COLLUMN_COUNT);
-                if (ReactionTimeDifference < 0) {
-                    strcpy(lcd_line_buffer, "Cedo");
-                } else if (ReactionTimeDifference < TestPeriodo) {
-                    strcpy(lcd_line_buffer, "No alvo");
+                    if (BatteryTestsRemaining > 0) {
+                        // Ainda há testes a fazer: sorteia o próximo valor e
+                        // volta para a tela "pronto" em vez de mostrar o
+                        // resultado individual — só o agregado final é
+                        // mostrado numa bateria (ver STATE_RANDOM_BATTERY_RESULT).
+                        AdvanceToNextBatteryValue();
+                        ProgramState = STATE_STARTING_TEST;
+                    } else {
+                        BatteryResultSelection = 0;
+                        ProgramState = STATE_RANDOM_BATTERY_RESULT;
+                    }
                 } else {
-                    strcpy(lcd_line_buffer, "Atrasado");
-                }
-                Lcd_Out(3, 1, lcd_line_buffer);
+                    memset(&lcd_line_buffer, ' ', LCD_COLLUMN_COUNT);
+                    strcpy(lcd_line_buffer, "Reacao: ");
 
-                ProgramState = STATE_FINISHED_TEST;
+                    LongToStr(ReactionTimeDifference, conversions_buffer);
+                    Ltrim(conversions_buffer);
+
+                    strcat(lcd_line_buffer, conversions_buffer);
+                    strcat(lcd_line_buffer, " ms");
+
+                    Lcd_Out(1, 1, lcd_line_buffer);
+
+                    // Mostra a janela [0, TestPeriodo) considerada "no alvo"
+                    // e classifica o resultado.
+                    memset(&lcd_line_buffer, ' ', LCD_COLLUMN_COUNT);
+                    strcpy(lcd_line_buffer, "Alvo: 0 a ");
+                    LongToStr(TestPeriodo, conversions_buffer);
+                    Ltrim(conversions_buffer);
+                    strcat(lcd_line_buffer, conversions_buffer);
+                    strcat(lcd_line_buffer, " ms");
+                    Lcd_Out(2, 1, lcd_line_buffer);
+
+                    memset(&lcd_line_buffer, ' ', LCD_COLLUMN_COUNT);
+                    if (ReactionTimeDifference < 0) {
+                        strcpy(lcd_line_buffer, "Cedo");
+                    } else if (ReactionTimeDifference < TestPeriodo) {
+                        strcpy(lcd_line_buffer, "No alvo");
+                    } else {
+                        strcpy(lcd_line_buffer, "Atrasado");
+                    }
+                    Lcd_Out(3, 1, lcd_line_buffer);
+
+                    ProgramState = STATE_FINISHED_TEST;
+                }
 
                 // Religa a recepção do UART1. Limpa um possível overrun
                 // (RCSTA.OERR) primeiro: bytes podem ter se acumulado no
