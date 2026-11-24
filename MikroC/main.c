@@ -79,17 +79,13 @@ sbit LCD_D7_Direction at TRISD3_bit;
 #define STATE_IDLE                  0
 #define STATE_INIT_RENDER_MENU      1
 #define STATE_SELECTING_MENU        2
-#define STATE_INIT_CONFIG_PERIODO   3
-#define STATE_CONFIG_PERIODO        4
-#define STATE_INIT_CONFIG_BLUETOOTH 5
-#define STATE_CONFIG_BLUETOOTH      6
-#define STATE_STARTING_TEST         7
-#define STATE_TEST_READY            8
-#define STATE_TEST_BEGIN            9
-#define STATE_RUNNING_TEST          10
-#define STATE_CALCULATE_TEST_RESULT 11
-#define STATE_FINISHED_TEST         12
-#define STATE_ERROR                 13
+#define STATE_STARTING_TEST         3
+#define STATE_TEST_READY            4
+#define STATE_TEST_BEGIN            5
+#define STATE_RUNNING_TEST          6
+#define STATE_CALCULATE_TEST_RESULT 7
+#define STATE_FINISHED_TEST         8
+#define STATE_ERROR                 9
 
 volatile u8 ProgramState = STATE_IDLE;
 
@@ -149,21 +145,21 @@ void ApplyBluetoothState() {
     BLUETOOTH_CONTROL_PORT = BluetoothEnabled ? BLUETOOTH_ON_LEVEL : BLUETOOTH_OFF_LEVEL;
 }
 
-// Menu OnClicks
-void PeriodoOnClick() {
-    switch (ProgramState) {
-        case STATE_SELECTING_MENU: ProgramState = STATE_INIT_CONFIG_PERIODO; break;
-        case STATE_CONFIG_PERIODO: ProgramState = STATE_INIT_RENDER_MENU; break;
-        default: break;
-    }
-}
+// Período e Bluetooth são editados in-line na própria tela de menu (ver
+// renderMenu()) em vez de abrirem uma tela própria: um clique no item
+// "trava" a rotação do encoder nesse item (em vez de navegar entre os
+// itens), o segundo clique destrava. Os dois itens só precisam alternar
+// essa trava — ToggleMenuLock() fica genérico para ambos.
+volatile u8 MenuLocked = 0;
 
-void BluetoothOnClick() {
-    switch (ProgramState) {
-        case STATE_SELECTING_MENU: ProgramState = STATE_INIT_CONFIG_BLUETOOTH; break;
-        case STATE_CONFIG_BLUETOOTH: ProgramState = STATE_INIT_RENDER_MENU; break;
-        default: break;
-    }
+// Cursor exibido na frente do item selecionado: ">" navegando entre itens,
+// "]" com o item travado para edição (ver MenuLocked).
+#define MENU_CURSOR_UNLOCKED ">"
+#define MENU_CURSOR_LOCKED   "]"
+
+// Menu OnClicks
+void ToggleMenuLock() {
+    MenuLocked = !MenuLocked;
 }
 
 void IniciarOnClick() {
@@ -174,9 +170,13 @@ typedef void (*OnClickFunc)(void);
 typedef struct { StrView Name; OnClickFunc OnClick; } MenuOption;
 
 #define NUM_MENU_ITEMS 3
+#define MENU_ITEM_PERIODO   0
+#define MENU_ITEM_BLUETOOTH 1
+#define MENU_ITEM_INICIAR   2
+
 const MenuOption MenuItems[NUM_MENU_ITEMS] = {
-    { MAKE_VIEW("Periodo"),   PeriodoOnClick },
-    { MAKE_VIEW("Bluetooth"), BluetoothOnClick },
+    { MAKE_VIEW("Periodo"),   ToggleMenuLock },
+    { MAKE_VIEW("Bluetooth"), ToggleMenuLock },
     { MAKE_VIEW("Iniciar"),   IniciarOnClick }
 };
 
@@ -370,8 +370,6 @@ void interrupt() {
                 ProgramState = STATE_INIT_RENDER_MENU;
             break;
             case STATE_SELECTING_MENU:
-            case STATE_CONFIG_BLUETOOTH:
-            case STATE_CONFIG_PERIODO:
                 MenuItems[SelectedMenuOption].OnClick();
             break;
         }
@@ -386,26 +384,88 @@ void strcpy_ROM_to_RAM(char* ram_dest, const char* rom_src) {
     *ram_dest = '\0';
 }
 
+// Preenche buf (já terminado em '\0') com espaços até width colunas, para
+// apagar na LCD o que tiver sobrado de uma renderização anterior mais longa
+// (ex.: TestPeriodo encolhendo de "5000" para "5" precisa apagar 3
+// colunas) — sem isso o Lcd_Out só escreveria até o '\0' atual e deixaria
+// os caracteres antigos visíveis depois do novo texto, mais curto.
+void PadToWidth(char* buf, u8 width) {
+    u8 len = strlen(buf);
+    while (len < width) buf[len++] = ' ';
+    buf[len] = '\0';
+}
+
+// Aplica a rotação do encoder ao item travado (ver MenuLocked) em vez de
+// navegar entre itens: Período ajusta o valor em passos de PERIODO_STEP,
+// Bluetooth alterna ligado/desligado a cada giro. Mesma lógica que antes
+// vivia em renderPeriodoMenu()/renderBluetoothMenu(), só que operando
+// in-line na linha do item em vez de numa tela própria.
+void AdjustSelectedMenuValue(i8 encoder_delta) {
+    switch (SelectedMenuOption) {
+        case MENU_ITEM_PERIODO:
+            TestPeriodo += encoder_delta * PERIODO_STEP;
+            if (TestPeriodo > MAX_PERIODO) TestPeriodo = MIN_PERIODO;
+            if (TestPeriodo < MIN_PERIODO) TestPeriodo = MAX_PERIODO;
+            break;
+        case MENU_ITEM_BLUETOOTH:
+            if (encoder_delta != 0) {
+                BluetoothEnabled = !BluetoothEnabled;
+                ApplyBluetoothState();
+            }
+            break;
+        default:
+            break;
+    }
+}
+
 void renderMenu() {
     u8 i;
     char lcd_line_buffer[LCD_COLLUMN_COUNT];
+    char value_buffer[7];
+    i8 encoder_delta;
     float raw_percent;
     i16 rounded_percent;
     volatile u32 adc_value;
     u8 percent;
 
-    SelectedMenuOption += getEncoderInput();
+    encoder_delta = getEncoderInput();
 
-    if(SelectedMenuOption < 0) SelectedMenuOption = NUM_MENU_ITEMS - 1;
-    else if(SelectedMenuOption >= NUM_MENU_ITEMS) SelectedMenuOption = 0;
+    if (MenuLocked) {
+        AdjustSelectedMenuValue(encoder_delta);
+    } else {
+        SelectedMenuOption += encoder_delta;
+        if(SelectedMenuOption < 0) SelectedMenuOption = NUM_MENU_ITEMS - 1;
+        else if(SelectedMenuOption >= NUM_MENU_ITEMS) SelectedMenuOption = 0;
+    }
 
     for (i = 0; i < NUM_MENU_ITEMS; i++) {
-        memset(&lcd_line_buffer, ' ', LCD_COLLUMN_COUNT);
-        strcpy_ROM_to_RAM(lcd_line_buffer, MenuItems[i].Name.Data);
+        switch (i) {
+            case MENU_ITEM_PERIODO:
+                strcpy(lcd_line_buffer, "Periodo: ");
+                IntToStr(TestPeriodo, value_buffer);
+                Ltrim(value_buffer);
+                strcat(lcd_line_buffer, value_buffer);
+                strcat(lcd_line_buffer, " ms");
+                PadToWidth(lcd_line_buffer, 16);
+                break;
+            case MENU_ITEM_BLUETOOTH:
+                strcpy(lcd_line_buffer, "Bluetooth: ");
+                strcat(lcd_line_buffer, BluetoothEnabled ? "Ligado" : "Deslig.");
+                PadToWidth(lcd_line_buffer, 18);
+                break;
+            default:
+                memset(&lcd_line_buffer, ' ', LCD_COLLUMN_COUNT);
+                strcpy_ROM_to_RAM(lcd_line_buffer, MenuItems[i].Name.Data);
+                break;
+        }
+
         Lcd_Out(i+1, 2, lcd_line_buffer);
 
-        if (i == SelectedMenuOption) Lcd_Out(i+1, 1, ">");
-        else Lcd_Out(i+1, 1, " ");
+        if (i == SelectedMenuOption) {
+            Lcd_Out(i+1, 1, MenuLocked ? MENU_CURSOR_LOCKED : MENU_CURSOR_UNLOCKED);
+        } else {
+            Lcd_Out(i+1, 1, " ");
+        }
     }
 
     adc_value = Read_ADC_Manual();
@@ -424,31 +484,6 @@ void renderMenu() {
     Ltrim(lcd_line_buffer);
     Lcd_Out(4, (LCD_COLLUMN_COUNT - 3), lcd_line_buffer);
     Lcd_Out(4, LCD_COLLUMN_COUNT, "%");
-}
-
-void renderPeriodoMenu() {
-    char periodo_buffer[7]; 
-    TestPeriodo += getEncoderInput() * PERIODO_STEP;
-
-    if (TestPeriodo > MAX_PERIODO) TestPeriodo = MIN_PERIODO;
-    if (TestPeriodo < MIN_PERIODO) TestPeriodo = MAX_PERIODO;
-
-    IntToStr(TestPeriodo, periodo_buffer);
-
-    Lcd_Out(1, 1, "Periodo: ");
-    Lcd_Out(2, 1, periodo_buffer);
-    Lcd_Out_CP(" ms ");
-}
-
-void renderBluetoothMenu() {
-    if (getEncoderInput() != 0) {
-        BluetoothEnabled = !BluetoothEnabled;
-        ApplyBluetoothState();
-    }
-
-    Lcd_Out(1, 1, "Bluetooth:");
-    if (BluetoothEnabled) Lcd_Out(2, 1, "Ligado    ");
-    else Lcd_Out(2, 1, "Desligado ");
 }
 
 void main() {
@@ -526,24 +561,11 @@ void main() {
             break;
             case STATE_INIT_RENDER_MENU:
                 Lcd_Cmd(_LCD_CLEAR);
+                MenuLocked = 0;
                 ProgramState = STATE_SELECTING_MENU;
             break;
             case STATE_SELECTING_MENU:
                 renderMenu();
-            break;
-            case STATE_INIT_CONFIG_PERIODO:
-                Lcd_Cmd(_LCD_CLEAR);
-                ProgramState = STATE_CONFIG_PERIODO;
-            break;
-            case STATE_CONFIG_PERIODO:
-                renderPeriodoMenu();
-            break;
-            case STATE_INIT_CONFIG_BLUETOOTH:
-                Lcd_Cmd(_LCD_CLEAR);
-                ProgramState = STATE_CONFIG_BLUETOOTH;
-            break;
-            case STATE_CONFIG_BLUETOOTH:
-                renderBluetoothMenu();
             break;
             case STATE_STARTING_TEST:
                 TMR0IE_bit = 0;
