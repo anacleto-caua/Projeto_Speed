@@ -97,7 +97,7 @@ volatile u8 ProgramState = STATE_IDLE;
 // MIN_PERIODO=0 permitia um chase degenerado de 0 ms: com TestPeriodo=0 o
 // Timer0 avançava os 32 LEDs em ~32 ms e o "acerto" virava "aperte
 // imediatamente ao iniciar o teste".
-#define MIN_PERIODO 1
+#define MIN_PERIODO 5
 #define MAX_PERIODO 5000
 #define PERIODO_STEP 5
 
@@ -312,19 +312,13 @@ void interrupt() {
             LedExposition++;
             TimeSinceTestStarted++;
 
-            if(LedExposition >= TestPeriodo){
+            if(LedExposition >= TestPeriodo) {
                 LedExposition = 0;
                 CurrentLed++;
-
                 if (CurrentLed >= NUM_LEDS) {
-                    SET_LED_DMUX(0);
                     CurrentLed = 0;
-                    current_timer = TimeSinceTestStarted;
-                    ReactionTimeDifference = (i32)current_timer - (i32)TimeMeantForUserReaction;
-                    ProgramState = STATE_CALCULATE_TEST_RESULT;
-                } else {
-                    SET_LED_DMUX(CurrentLed);
                 }
+                SET_LED_DMUX(CurrentLed);
             }
         }
     }
